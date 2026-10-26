@@ -55,6 +55,10 @@ CLASSES = {
     'ndp3':   (0xfe800000, 0xf2000000),
     'nimm':   (0xfeb80090, 0xf2800010),
     'nld':    (0xff900000, 0xf4000000),
+    'nlane':  (0xff800000, 0xf4800000),
+    'nshift': (0xfe800010, 0xf2800010),
+    'n3diff': (0xfe800010, 0xf2800000),
+    'ssat':   (0x0fa00030, 0x06a00010),
     'nvsel':  (0xff800e50, 0xfe000a00),
     'vdp':    (0x0f000e10, 0x0e000a00),
     'vxfer':  (0x0f000e10, 0x0e000a10),
@@ -75,7 +79,7 @@ def rand_word(rng, cls):
         kind = rng.choice([0xf, 0xe, 0xc]); w = (w & ~0xf00) | (kind << 8)
         if cls == 'stex' and kind == 0xc: w |= 0xf000
     cond = 14 if rng.random() < 0.6 else rng.randrange(14)
-    if cls in ('ndp3', 'nimm', 'nld', 'nvsel'): cond = 15
+    if cls in ('ndp3', 'nimm', 'nld', 'nvsel', 'nlane', 'nshift', 'n3diff'): cond = 15
     if cls == 'nld': w = (w & ~0xf00) | (rng.choice([7, 10, 6, 2]) << 8)
     return (w & 0x0fffffff) | (cond << 28)
 

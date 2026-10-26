@@ -329,6 +329,16 @@ class Lifter(VfpMixin, NeonMixin):
             if rn == 15: out.append('mov w%d, w16' % rd)
             else: out += ['and w17, w%d, #0xffff' % rn, 'and w15, w16, #0xffff', 'add w17, w17, w15', 'and w17, w17, #0xffff', 'and w15, w%d, #0xffff0000' % rn, 'and w16, w16, #0xffff0000', 'add w15, w15, w16', 'orr w%d, w15, w17' % rd]
             return True
+        if bits(w, 27, 21) in (0x35, 0x37) and bits(w, 5, 4) == 1:   # ssat / usat Rd, #sat, Rn{, shift}
+            uns = bits(w, 22, 22); rd, rn, sat, imm, sh = bits(w, 15, 12), bits(w, 3, 0), bits(w, 20, 16), bits(w, 11, 7), bits(w, 6, 6)
+            if 15 in (rd, rn): raise Unsupported('pc in ssat')
+            n = sat + (0 if uns else 1)
+            src = 'w%d' % rn
+            if imm or sh:
+                out.append('asr w16, w%d, #%d' % (rn, imm or 32) if sh and imm else ('asr w16, w%d, #31' % rn if sh else 'lsl w16, w%d, #%d' % (rn, imm))); src = 'w16'
+            hi = (1 << n) - 1 if uns else (1 << (n - 1)) - 1; lo = 0 if uns else -(1 << (n - 1))
+            out += ['dup v16.4s, %s' % src] + mov32('w17', hi & 0xffffffff) + ['dup v17.4s, w17'] + mov32('w17', lo & 0xffffffff) + ['dup v18.4s, w17', 'smin v16.4s, v16.4s, v17.4s', 'smax v16.4s, v16.4s, v18.4s', 'mov w%d, v16.s[0]' % rd]
+            return True
         if bits(w, 27, 21) in (0x3d, 0x3f) and bits(w, 6, 4) == 5:     # sbfx / ubfx
             rd, rn, lsb, wm1 = bits(w, 15, 12), bits(w, 3, 0), bits(w, 11, 7), bits(w, 20, 16)
             if 15 in (rd, rn) or lsb + wm1 > 31: raise Unsupported('bitfield extract')

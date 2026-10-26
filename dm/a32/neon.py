@@ -100,7 +100,7 @@ class NeonMixin:
 
     # ---- loads and stores of vectors --------------------------------------------------------------------------------------------
     def neon_ldst(self, w, addr, out):
-        if bits(w, 23, 23): return False                                                          # single element / all lanes: not covered yet
+        if bits(w, 23, 23): return self.neon_lane(w, addr, out)                                   # single element / all lanes
         L, rn, rm = bits(w, 21, 21), bits(w, 19, 16), bits(w, 3, 0)
         typ = bits(w, 11, 8); d = (bits(w, 22, 22) << 4) | bits(w, 15, 12)
         nregs = {7: 1, 10: 2, 6: 3, 2: 4}.get(typ)
@@ -129,6 +129,8 @@ class NeonMixin:
         U, Q = bits(w, 24, 24), bits(w, 6, 6)
         if not bits(w, 23, 23): return self.neon_3same(w, U, Q, out)
         if bits(w, 21, 19) == 0 and bits(w, 7, 7) == 0 and bits(w, 4, 4): return self.neon_imm(w, U, Q, out)
+        if bits(w, 4, 4): return self.neon_shift(w, U, Q, out)
+        if not bits(w, 4, 4) and bits(w, 21, 20) != 3: return self.neon_3diff(w, U, out)
         return False
 
     def neon_regs(self, w, Q):
@@ -167,6 +169,13 @@ class NeonMixin:
             out.append('%s %s.%s, %s.%s, %s.%s' % (mn, dst, arr, a, arr, b, arr)); fin(dst); return True
         if A == 6 and size < 3:                                                                   # vmax / vmin
             mn = ('u' if U else 's') + ('min' if B else 'max'); out.append('%s %s.%s, %s.%s, %s.%s' % (mn, dst, arr, a, arr, b, arr)); fin(dst); return True
+        if A == 0 and B == 1 and size < 4:                                                        # vqadd
+            out.append('%s %s.%s, %s.%s, %s.%s' % ('uqadd' if U else 'sqadd', dst, arr, a, arr, b, arr)); fin(dst); return True
+        if A == 2 and B == 1 and size < 4:                                                        # vqsub
+            out.append('%s %s.%s, %s.%s, %s.%s' % ('uqsub' if U else 'sqsub', dst, arr, a, arr, b, arr)); fin(dst); return True
+        if A == 9 and B == 0 and size < 3:                                                        # vmla.i / vmls.i (accumulate into the destination)
+            if not Q: out.append('mov v16.d[0], v%d.d[%d]' % (d >> 1, d & 1))
+            out.append('%s %s.%s, %s.%s, %s.%s' % ('mls' if U else 'mla', dst, arr, a, arr, b, arr)); fin(dst); return True
         if A == 9 and B == 1 and size < 3 and not U:                                              # vmul.i
             out.append('mul %s.%s, %s.%s, %s.%s' % (dst, arr, a, arr, b, arr)); fin(dst); return True
         if A == 11 and B == 1 and not U and size < 3:                                             # vpadd.i
@@ -178,6 +187,108 @@ class NeonMixin:
         if A == 13 and B == 1 and U and size in (0, 2):                                           # vmul.f32
             f = '4s' if Q else '2s'; self.std_fpcr(out, 'fmul %s.%s, %s.%s, %s.%s' % (dst, f, a, f, b, f)); fin(dst); return True
         raise Unsupported('neon three-register A=%d B=%d U=%d size=%d' % (A, B, U, size))
+
+    # ---- shifts by immediate, narrowing and widening ------------------------------------------------------------------------------------------
+    def neon_shift(self, w, U, Q, out): return self.neon_shift2(w, U, Q, out)
+
+    def neon_shift2(self, w, U, Q, out):
+        A, L, imm6, op = bits(w, 11, 8), bits(w, 7, 7), bits(w, 21, 16), bits(w, 6, 6)
+        d = (bits(w, 22, 22) << 4) | bits(w, 15, 12); m = (bits(w, 5, 5) << 4) | bits(w, 3, 0)
+        def elem():
+            if L: return 64, imm6
+            if imm6 >= 32: return 32, imm6 - 32
+            if imm6 >= 16: return 16, imm6 - 16
+            if imm6 >= 8: return 8, imm6 - 8
+            return None, 0
+        TQ = {8: '16b', 16: '8h', 32: '4s', 64: '2d'}; TD = {8: '8b', 16: '4h', 32: '2s'}
+        if A in (8, 9):                                                                            # narrowing: bit 6 selects the rounding form (op) for 8 / 9; the destination element size is esize, the source 2 * esize
+            if L: return False
+            if imm6 >= 32: es, sh = 32, 64 - imm6
+            elif imm6 >= 16: es, sh = 16, 32 - imm6
+            elif imm6 >= 8: es, sh = 8, 16 - imm6
+            else: return False
+            if m & 1: raise Unsupported('narrowing shift of an odd q register')
+            if A == 8: mn = {(0, 0): 'shrn', (0, 1): 'rshrn', (1, 0): 'sqshrun', (1, 1): 'sqrshrun'}[(U, op)]
+            else: mn = {(0, 0): 'sqshrn', (0, 1): 'sqrshrn', (1, 0): 'uqshrn', (1, 1): 'uqrshrn'}[(U, op)]
+            out.append('%s v16.%s, v%d.%s, #%d' % (mn, TD[es], m >> 1, TQ[es * 2], sh))
+            out.append('mov v%d.d[%d], v16.d[0]' % (d >> 1, d & 1)); return True
+        if A == 10 and not op:                                                                     # vshll / vmovl (widening, source D, result Q)
+            if L: return False
+            if imm6 >= 32: es, sh = 32, imm6 - 32
+            elif imm6 >= 16: es, sh = 16, imm6 - 16
+            elif imm6 >= 8: es, sh = 8, imm6 - 8
+            else: return False
+            if d & 1: raise Unsupported('widening shift into an odd q register')
+            src = self.dsrc(m, 17, out)
+            out.append('%s v%d.%s, %s.%s, #%d' % ('ushll' if U else 'sshll', d >> 1, TQ[es * 2], src, TD[es], sh)); return True
+        es, sh = elem()
+        if es is None: return False
+        Q = op
+        if Q and (d | m) & 1: raise Unsupported('q register with an odd number')
+        def dreg(x, tmp): return ('v%d' % (x >> 1)) if Q else self.dsrc(x, tmp, out)
+        right = A in (0, 1, 2, 3)
+        if right: sh = 2 * es - imm6 if not L else 64 - imm6
+        else: sh = imm6 - es if not L else imm6
+        if A == 5 and not U: mn = 'shl'
+        elif A == 0: mn = 'ushr' if U else 'sshr'
+        elif A == 1: mn = 'usra' if U else 'ssra'
+        elif A == 2: mn = 'urshr' if U else 'srshr'
+        elif A == 3: mn = 'ursra' if U else 'srsra'
+        else: return False
+        src = dreg(m, 17)
+        dst = 'v%d' % (d >> 1) if Q else 'v16'
+        if mn in ('ssra', 'usra', 'srsra', 'ursra') and not Q: out.append('mov v16.d[0], v%d.d[%d]' % (d >> 1, d & 1))
+        if not Q and es == 64: out.append('%s d16, d%s, #%d' % (mn, src[1:], sh))
+        else: out.append('%s %s.%s, %s.%s, #%d' % (mn, dst, (TQ if Q else TD)[es] if (Q or es < 64) else '', src, (TQ if Q else TD)[es], sh))
+        if not Q: out.append('mov v%d.d[%d], v16.d[0]' % (d >> 1, d & 1))
+        return True
+
+    def neon_3diff(self, w, U, out):
+        size, A = bits(w, 21, 20), bits(w, 11, 8)
+        d = (bits(w, 22, 22) << 4) | bits(w, 15, 12); n = (bits(w, 7, 7) << 4) | bits(w, 19, 16); m = (bits(w, 5, 5) << 4) | bits(w, 3, 0)
+        TQ = {0: '8h', 1: '4s', 2: '2d'}; TD = {0: '8b', 1: '4h', 2: '2s'}
+        mn = {8: 'smlal', 10: 'smlsl', 12: 'smull', 0: 'saddl', 2: 'ssubl', 7: 'sabdl', 5: 'sabal'}.get(A)
+        if mn is None: return False
+        if U: mn = 'u' + mn[1:]
+        if d & 1: raise Unsupported('long operation into an odd q register')
+        a, b = self.dsrc(n, 17, out), self.dsrc(m, 18, out)
+        out.append('%s v%d.%s, %s.%s, %s.%s' % (mn, d >> 1, TQ[size], a, TD[size], b, TD[size])); return True
+
+    # ---- single-element and all-lanes loads and stores (vld1 .. vld4 lane, vst1 .. vst4 lane, vld1 dup) ----------------------------------------------
+    def neon_lane(self, w, addr, out):
+        L, rn, rm = bits(w, 21, 21), bits(w, 19, 16), bits(w, 3, 0)
+        d = (bits(w, 22, 22) << 4) | bits(w, 15, 12); size = bits(w, 11, 10)
+        if rn == 15: raise Unsupported('vld lane with pc base')
+        if size == 3:                                                                              # all lanes: vld1 only (one or two registers)
+            if not L or bits(w, 9, 8) != 0: return False
+            es = 1 << bits(w, 7, 6); nreg = 2 if bits(w, 5, 5) else 1
+            if es > 4 or (es == 4 and bits(w, 4, 4) and False): return False
+            arr = {1: '8b', 2: '4h', 4: '2s'}[es]
+            out.append('add x17, x28, w%d, uxtw' % rn)
+            for k in range(nreg):
+                out += ['ld1r {v16.%s}, [x17]' % arr, 'mov v%d.d[%d], v16.d[0]' % ((d + k) >> 1, (d + k) & 1)]
+            bytes_ = es * 1
+            if rm == 13: out.append('add w%d, w%d, #%d' % (rn, rn, es))
+            elif rm != 15: out.append('add w%d, w%d, w%d' % (rn, rn, rm))
+            return True
+        nreg = bits(w, 9, 8) + 1; es = 1 << size
+        if size == 0: idx, inc = bits(w, 7, 5), 1
+        elif size == 1: idx, inc = bits(w, 7, 6), 2 if bits(w, 5, 5) else 1
+        else: idx, inc = bits(w, 7, 7), 2 if bits(w, 6, 6) else 1
+        T = {1: 'b', 2: 'h', 4: 's'}[es]; perd = 8 // es
+        out.append('mov w15, w%d' % rn)
+        for k in range(nreg):
+            reg = d + k * inc
+            if reg > 31: raise Unsupported('vld lane register list')
+            vr = reg >> 1; lane = (reg & 1) * perd + idx
+            if L: out += ['ldr %s16, [x28, w15, uxtw]' % T, 'mov v%d.%s[%d], v16.%s[0]' % (vr, T, lane, T)]
+            else: out += ['mov v16.%s[0], v%d.%s[%d]' % (T, vr, T, lane), 'str %s16, [x28, w15, uxtw]' % T]
+            out.append('add w15, w15, #%d' % es)
+        if rm == 13: out.append('add w%d, w%d, #%d' % (rn, rn, es * nreg))
+        elif rm != 15:
+            if rm == rn: raise Unsupported('vld lane with the index register as the base')
+            out.append('add w%d, w%d, w%d' % (rn, rn, rm))
+        return True
 
     def std_fpcr(self, out, op):
         """Run a NEON floating-point operation with the 'standard FPSCR value' (flush-to-zero and default NaN on), restoring the guest's FPCR after."""

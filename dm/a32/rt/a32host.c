@@ -46,6 +46,7 @@ static uint32_t hook_for(const char *name, void (*fn)(Frame *)) {
 static const ForceEnt *force_find(const char *name) {
     for (unsigned i = 0; i < a32_nforce; i++) if (!strcmp(a32_force[i].name, name)) return &a32_force[i];
     for (unsigned i = 0; i < a32_nforce_gfx; i++) if (!strcmp(a32_force_gfx[i].name, name)) return &a32_force_gfx[i];
+    for (unsigned i = 0; i < a32_nforce_audren; i++) if (!strcmp(a32_force_audren[i].name, name)) return &a32_force_audren[i];
     for (unsigned i = 0; i < a32_nforce_movie; i++) if (!strcmp(a32_force_movie[i].name, name)) return &a32_force_movie[i];
     return NULL;
 }

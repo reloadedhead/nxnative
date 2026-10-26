@@ -19,7 +19,6 @@ void dm_res_report_register(void (*fn)(uint32_t, const char *)) { (void)fn; }
 void *module_of(const void *p) { (void)p; return NULL; }                 // no 64-bit guest modules
 // the window (dm/host/front_mac.m, linked in) calls these: the controller state it collects is kept here for the hid service
 uint64_t a32_pad_buttons; int32_t a32_pad_axes[4];
-void dm_audio_suspend(int on) { (void)on; }
 void dm_focus_set(int st) { (void)st; }
 void dm_haptics_apple_init(void) {}
 void dm_haptics_apple_controller(int player, void *controller) { (void)player; (void)controller; }
@@ -43,3 +42,13 @@ int a32_gfx_fault(void *addr, int is_write, void *uc) { return g_fault ? g_fault
 void nvn_big_entry(void) {}
 void nvn_prof_entry(void) {}
 void nvn_unimpl_entry(void) {}
+
+// what dm/host/hle_audio.c (the host's PCM output, linked as it is) asks of the 64-bit host
+#include <pthread.h>
+static struct { const void *k; void *v; } g_objmap[64]; static pthread_mutex_t g_objmu = PTHREAD_MUTEX_INITIALIZER;
+void *objmap_get(const void *g) { void *r = NULL; pthread_mutex_lock(&g_objmu); for (int i = 0; i < 64; i++) if (g_objmap[i].k == g) r = g_objmap[i].v; pthread_mutex_unlock(&g_objmu); return r; }
+void objmap_put(const void *g, void *h) { pthread_mutex_lock(&g_objmu); for (int i = 0; i < 64; i++) if (!g_objmap[i].k) { g_objmap[i].k = g; g_objmap[i].v = h; break; } pthread_mutex_unlock(&g_objmu); }
+void *objmap_del(const void *g) { void *r = NULL; pthread_mutex_lock(&g_objmu); for (int i = 0; i < 64; i++) if (g_objmap[i].k == g) { r = g_objmap[i].v; g_objmap[i].k = NULL; } pthread_mutex_unlock(&g_objmu); return r; }
+void hle_bind_system_event(void *ev, int clear) { (void)ev; (void)clear; }
+void hle_signal_system_event(void *ev) { (void)ev; }
+void dm_host_helper_qos(int q) { (void)q; }

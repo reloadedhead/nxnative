@@ -84,7 +84,11 @@ static int wait_big(int64_t ns) {
 static volatile uint32_t *gptr(uint32_t a) { return (volatile uint32_t *)(g_mem + a); }
 
 // the guest's mutex word: owner handle | WAIT_MASK when somebody waits. ArbitrateLock sleeps while the word still says "owned by that thread, with waiters".
+static uint32_t g_watch;
+#define WATCH(addr, ...) do { if (g_watch && (addr) == g_watch) { fprintf(stderr, "[a32] watch %#x: ", addr); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } } while (0)
 static uint32_t arbitrate_lock(uint32_t owner, uint32_t addr, uint32_t tag) {
+    if (!g_watch && getenv("A32_WATCH")) g_watch = (uint32_t)strtoul(getenv("A32_WATCH"), NULL, 16);
+    WATCH(addr, "[t%u] ArbitrateLock owner %#x tag %#x word %#x", t_self->id, owner, tag, rd32(addr));
     pthread_mutex_lock(&g_big);
     GThread *me = t_self;
     for (;;) {
@@ -98,6 +102,7 @@ static uint32_t arbitrate_lock(uint32_t owner, uint32_t addr, uint32_t tag) {
     (void)tag; return KR_OK;
 }
 static uint32_t arbitrate_unlock(uint32_t addr) {
+    WATCH(addr, "[t%u] ArbitrateUnlock word %#x", t_self->id, rd32(addr));
     pthread_mutex_lock(&g_big);
     GThread *best = NULL; int more = 0;
     for (GThread *t = g_threads; t; t = t->next) if (t->waiting_lock && t->wait_addr == addr && !t->woken) { if (!best || t->prio < best->prio) { if (best) more = 1; best = t; } else more = 1; }
@@ -109,6 +114,7 @@ static uint32_t arbitrate_unlock(uint32_t addr) {
     return KR_OK;
 }
 static uint32_t wait_key_atomic(uint32_t addr, uint32_t key, uint32_t tag, int64_t timeout) {
+    WATCH(addr, "[t%u] WaitKeyAtomic key %#x tag %#x word %#x timeout %lld", t_self->id, key, tag, rd32(addr), (long long)timeout);
     pthread_mutex_lock(&g_big);
     GThread *me = t_self;
     // release the mutex at addr as ArbitrateUnlock does
@@ -125,6 +131,7 @@ static uint32_t wait_key_atomic(uint32_t addr, uint32_t key, uint32_t tag, int64
         else if (pthread_cond_timedwait(&g_big_cv, &g_big, &ts) == ETIMEDOUT) to = 1;
     }
     me->waiting_key = 0;
+    if (to) { pthread_mutex_unlock(&g_big); return KR_TIMEOUT; }       // a timeout leaves the mutex unlocked: the caller (libnx, nn::os) locks it again itself
     // re-acquire the mutex word: take it if free, otherwise mark it contended and sleep as a lock waiter
     for (;;) {
         uint32_t cur = __atomic_load_n(gptr(addr), __ATOMIC_ACQUIRE);
@@ -307,7 +314,7 @@ void a32_svc_c(uint32_t num, Frame *f) {
         pthread_mutex_lock(&g_big); t->cancel_sync = 1; pthread_cond_broadcast(&g_big_cv); pthread_mutex_unlock(&g_big);
         r[0] = KR_OK; return;
     }
-    case 0x1a: r[0] = arbitrate_lock(r[0], r[1], r[2]); return;
+    case 0x1a: if ((r[0] & ~WAIT_MASK) == r[2]) { LOG("recursive lock of %#x by thread %u", r[1], t_self->id); dump_regs(f); } r[0] = arbitrate_lock(r[0], r[1], r[2]); return;
     case 0x1b: r[0] = arbitrate_unlock(r[0]); return;
     case 0x1c: r[0] = wait_key_atomic(r[0], r[1], r[2], (int64_t)(((uint64_t)r[4] << 32) | r[3])); return;
     case 0x1d: signal_key(r[0], (int32_t)r[1]); r[0] = KR_OK; return;
