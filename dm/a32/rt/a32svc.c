@@ -135,9 +135,9 @@ static uint32_t wait_key_atomic(uint32_t addr, uint32_t key, uint32_t tag, int64
     // re-acquire the mutex word: take it if free, otherwise mark it contended and sleep as a lock waiter
     for (;;) {
         uint32_t cur = __atomic_load_n(gptr(addr), __ATOMIC_ACQUIRE);
-        if (cur == 0) { __atomic_store_n(gptr(addr), tag, __ATOMIC_RELEASE); break; }
+        if (cur == 0) { uint32_t z = 0; if (__atomic_compare_exchange_n(gptr(addr), &z, tag, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break; continue; }     // the guest's own atomics race with these: compare-and-swap, never a blind store
         uint32_t owner = cur & ~WAIT_MASK;
-        __atomic_store_n(gptr(addr), owner | WAIT_MASK, __ATOMIC_RELEASE);
+        if (!(cur & WAIT_MASK) && !__atomic_compare_exchange_n(gptr(addr), &cur, owner | WAIT_MASK, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) continue;
         me->waiting_lock = 1; me->wait_addr = addr; me->woken = 0;
         while (!me->woken) wait_big(-1);
         me->waiting_lock = 0;
