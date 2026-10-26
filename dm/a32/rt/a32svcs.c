@@ -230,10 +230,16 @@ static int set_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc 
     }
 }
 static Obj *mk_set(void) { return obj_new("set", set_cmd, NULL); }
+// ---- pctl: parental controls are not restricting anything ----
+static int pctl_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
+    if (cmd == 0 || cmd == 1) { ipc_out_obj(c, obj_new("IParentalControlService", misc_generic, NULL)); return 0; }      // CreateService / CreateServiceWithoutInitialize
+    return misc_generic(o, cmd, in, in_sz, c);
+}
+static Obj *mk_pctl(void) { return obj_new("pctl", pctl_cmd, NULL); }
 Obj *a32_make_fsp(void);
 static Obj *make_named(const char *n) { return obj_of(n); }
 #define SVC(n) { n, NULL }
 static Obj *mk_lm(void) { return make_named("lm"); }
 static Obj *mk_oe(void) { return make_named("appletOE"); }
-const ServiceDef a32_services[] = { { "lm", mk_lm }, { "appletOE", mk_oe }, { "fsp-srv", a32_make_fsp }, { "hid", mk_hid }, { "acc:u0", mk_acc }, { "audren:u", mk_audren }, { "friend:u", mk_friend }, { "apm", mk_apm }, { "set", mk_set } };
+const ServiceDef a32_services[] = { { "lm", mk_lm }, { "appletOE", mk_oe }, { "fsp-srv", a32_make_fsp }, { "hid", mk_hid }, { "acc:u0", mk_acc }, { "audren:u", mk_audren }, { "friend:u", mk_friend }, { "pctl", mk_pctl }, { "pctl:s", mk_pctl }, { "pctl:r", mk_pctl }, { "pctl:a", mk_pctl }, { "apm", mk_apm }, { "set", mk_set } };
 const unsigned a32_nservices = sizeof a32_services / sizeof a32_services[0];

@@ -86,11 +86,102 @@ static int storage_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, 
     }
 }
 
+// ---- save data: an IFileSystem over a host directory (A32_SAVE_DIR, default <build>/save) ----
+#include <dirent.h>
+typedef struct { char root[1024]; } HostFs;
+static const Buf *path_buf(const Ipc *c, int k) { if (k < c->nx && c->x[k].addr) return &c->x[k]; if (k < c->na && c->a[k].addr) return &c->a[k]; return NULL; }
+static int host_path(const HostFs *fs, const Ipc *c, int k, char *out, size_t cap) {
+    const Buf *b = path_buf(c, k); if (!b) return 0x2ee;
+    const char *p = (const char *)g_mem + b->addr; size_t n = strnlen(p, b->size < 0x301 ? b->size : 0x301);
+    char tmp[0x302]; memcpy(tmp, p, n); tmp[n] = 0;
+    if (strstr(tmp, "..")) return 0x2ee;
+    snprintf(out, cap, "%s%s%s", fs->root, tmp[0] == '/' ? "" : "/", tmp);
+    size_t l = strlen(out); while (l > strlen(fs->root) + 1 && out[l - 1] == '/') out[--l] = 0;
+    return 0;
+}
+static int errno_result(void) { return errno == ENOENT ? 0x202 : errno == EEXIST ? 0x402 : errno == ENOTEMPTY ? 0x1002 : 0x2ee; }
+typedef struct { int fd; } HFile;
+static int hfile_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
+    HFile *f = o->data; (void)in_sz;
+    switch (cmd) {
+    case 0: {                                                                      // Read(option, offset, size) -> bytes read
+        uint64_t off, sz; memcpy(&off, in + 8, 8); memcpy(&sz, in + 16, 8);
+        Buf ob = c->nb && c->b[0].addr ? c->b[0] : c->nc ? c->rc[0] : (Buf){0, 0};
+        if (!ob.addr) return 0x2ee;
+        if (sz > ob.size) sz = ob.size;
+        ssize_t r = pread(f->fd, g_mem + ob.addr, sz, (off_t)off); if (r < 0) r = 0; ipc_put64(c, (uint64_t)r); return 0;
+    }
+    case 1: {                                                                      // Write(option, offset, size) from an input buffer
+        uint64_t off, sz; memcpy(&off, in + 8, 8); memcpy(&sz, in + 16, 8);
+        const Buf *ib = path_buf(c, 0); if (!ib) return 0x2ee;
+        if (sz > ib->size) sz = ib->size;
+        if (pwrite(f->fd, g_mem + ib->addr, sz, (off_t)off) < 0) return errno_result();
+        return 0;
+    }
+    case 2: fsync(f->fd); return 0;
+    case 3: { uint64_t sz; memcpy(&sz, in, 8); return ftruncate(f->fd, (off_t)sz) ? errno_result() : 0; }
+    case 4: { struct stat st; fstat(f->fd, &st); ipc_put64(c, (uint64_t)st.st_size); return 0; }
+    case 5: ipc_pad(c, 0x10); return 0;                                            // OperateRange
+    default: LOG("fs: IFile command %u not implemented: success", cmd); return 0;
+    }
+}
+typedef struct { char path[1024]; } HDir;
+static int hdir_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
+    HDir *d = o->data; (void)in; (void)in_sz;
+    if (cmd == 0 || cmd == 1) {
+        DIR *dp = opendir(d->path); if (!dp) return errno_result();
+        uint64_t n = 0, cap = 0; Buf ob = {0, 0};
+        if (cmd == 0) { ob = c->nb && c->b[0].addr ? c->b[0] : c->nc ? c->rc[0] : ob; cap = ob.size / 0x310; }
+        static __thread unsigned skip; (void)skip;
+        struct dirent *e;
+        while ((e = readdir(dp))) {
+            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+            if (cmd == 0 && n < cap) {
+                uint8_t *ent = g_mem + ob.addr + n * 0x310; memset(ent, 0, 0x310); strncpy((char *)ent, e->d_name, 0x300);
+                char full[2200]; snprintf(full, sizeof full, "%s/%s", d->path, e->d_name); struct stat st; stat(full, &st);
+                ent[0x304] = S_ISDIR(st.st_mode) ? 0 : 1; int64_t sz = S_ISDIR(st.st_mode) ? 0 : st.st_size; memcpy(ent + 0x308, &sz, 8);
+            }
+            n++;
+        }
+        closedir(dp);
+        ipc_put64(c, cmd == 0 ? (n < cap ? n : cap) : n); return 0;                // (a single Read returns up to the buffer; the rest on the next call is not tracked: save dirs are small)
+    }
+    return 0;
+}
+static int hfs_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
+    HostFs *fs = o->data; char p[2200], q[2200]; int r; (void)in_sz;
+    switch (cmd) {
+    case 0: { uint64_t sz; memcpy(&sz, in + 8, 8); if ((r = host_path(fs, c, 0, p, sizeof p))) return r;
+              int fd = open(p, O_CREAT | O_EXCL | O_WRONLY, 0644); if (fd < 0) return errno_result(); if (sz) ftruncate(fd, (off_t)sz); close(fd); return 0; }
+    case 1: if ((r = host_path(fs, c, 0, p, sizeof p))) return r; return unlink(p) ? errno_result() : 0;
+    case 2: if ((r = host_path(fs, c, 0, p, sizeof p))) return r; return mkdir(p, 0755) ? errno_result() : 0;
+    case 3: if ((r = host_path(fs, c, 0, p, sizeof p))) return r; return rmdir(p) ? errno_result() : 0;
+    case 4: case 13: if ((r = host_path(fs, c, 0, p, sizeof p))) return r; { char cmdline[2500]; snprintf(cmdline, sizeof cmdline, cmd == 4 ? "rm -rf '%s'" : "rm -rf '%s'/*", p); return system(cmdline) ? 0x2ee : 0; }
+    case 5: case 6: if ((r = host_path(fs, c, 0, p, sizeof p)) || (r = host_path(fs, c, 1, q, sizeof q))) return r; return rename(p, q) ? errno_result() : 0;
+    case 7: { if ((r = host_path(fs, c, 0, p, sizeof p))) return r; struct stat st; if (stat(p, &st)) return errno_result(); ipc_put32(c, S_ISDIR(st.st_mode) ? 0 : 1); return 0; }
+    case 8: { if ((r = host_path(fs, c, 0, p, sizeof p))) return r; uint32_t mode; memcpy(&mode, in, 4);
+              int fd = open(p, (mode & 2) ? O_RDWR : O_RDONLY); if (fd < 0 && (mode & 2) && errno != ENOENT) fd = open(p, O_RDONLY); if (fd < 0) return errno_result();
+              HFile *f = calloc(1, sizeof *f); f->fd = fd; ipc_out_obj(c, obj_new("IFile", hfile_cmd, f)); return 0; }
+    case 9: { if ((r = host_path(fs, c, 0, p, sizeof p))) return r; struct stat st; if (stat(p, &st) || !S_ISDIR(st.st_mode)) return errno_result();
+              HDir *d = calloc(1, sizeof *d); snprintf(d->path, sizeof d->path, "%s", p); ipc_out_obj(c, obj_new("IDirectory", hdir_cmd, d)); return 0; }
+    case 10: return 0;
+    case 11: case 12: ipc_put64(c, 0x40000000ull); return 0;
+    case 14: ipc_pad(c, 0x20); return 0;
+    default: LOG("fs: IFileSystem command %u not implemented: success, zeroed output", cmd); return 0;
+    }
+}
+static Obj *make_save_fs(void) {
+    HostFs *fs = calloc(1, sizeof *fs); const char *d = getenv("A32_SAVE_DIR");
+    if (d) snprintf(fs->root, sizeof fs->root, "%s", d); else snprintf(fs->root, sizeof fs->root, "%s/save", g_build_dir);
+    mkdir(fs->root, 0755); return obj_new("IFileSystem", hfs_cmd, fs);
+}
+
 // fsp-srv (IFileSystemProxy): 1 SetCurrentProcess, 200 OpenDataStorageByCurrentProcess -> IStorage, 1005 GetGlobalAccessLogMode
 static int fsp_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
     (void)in;
     switch (cmd) {
     case 1: return 0;
+    case 51: case 52: case 53: ipc_out_obj(c, make_save_fs()); return 0;                     // OpenSaveDataFileSystem (and by system id, read-only): one save directory
     case 200: ipc_out_obj(c, obj_new("IStorage", storage_cmd, NULL)); return 0;
     case 1005: ipc_put32(c, 0); return 0;
     case 202: LOG("fs: OpenDataStorageByDataId: no such system data (ResultTargetNotFound)"); return 0x202;

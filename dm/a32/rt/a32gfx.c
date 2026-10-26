@@ -4,6 +4,7 @@
 #include "a32host.h"
 #include "a32force.h"
 #include "a32gfx.h"
+#include <sys/stat.h>
 
 #define ARENA_BASE 0x0e000000u
 #define ARENA_SIZE 0x00800000u
@@ -75,11 +76,33 @@ static void ad_get_proc(Frame *f) {                    // nvnDeviceGetProcAddres
     f->r[0] = a32_hook_add(strdup(name), nvn_find(name) ? nvn_find(name) : nvn_unimplemented);
 }
 static void ad_nop(Frame *f) { f->r[0] = 0; }          // debug callbacks are not called on the host side
+// A32_SHADER_DUMP=<dir>: every distinct shader the game hands to nvnProgramSetShaders is saved as <fnv>.shdr = 'BTCDBTCD' + 0x30 header (control length at +0x28, code length at +0x2c) + code area + control section
+static void dump_shader(const uint8_t *code, const uint8_t *ctl, char *name_out) {
+    static const char *dir; static int init;
+    if (!init) { init = 1; dir = getenv("A32_SHADER_DUMP"); if (dir) mkdir(dir, 0755); }
+    if (!dir) return;
+    name_out[0] = 0;
+    if (*(const uint32_t *)ctl != 0x98761234u) { LOG("[RED] shader control section without its magic (%08x)", *(const uint32_t *)ctl); return; }
+    uint32_t nctl = *(const uint32_t *)(ctl + 0x20), ncode = *(const uint32_t *)(ctl + 0x704);
+    if (nctl < 0x700 || nctl > 0x2000 || ncode < 0x40 || ncode > (16u << 20)) { LOG("[RED] shader control lengths %#x / %#x", nctl, ncode); return; }
+    uint64_t h = 0xcbf29ce484222325ull; for (uint32_t i = 0; i < nctl; i++) h = (h ^ ctl[i]) * 0x100000001b3ull; for (uint32_t i = 0; i < ncode; i++) h = (h ^ code[i]) * 0x100000001b3ull;
+    char path[1024]; snprintf(path, sizeof path, "%s/%016llx.shdr", dir, (unsigned long long)h);
+    snprintf(name_out, 64, "%016llx.shdr", (unsigned long long)h);
+    struct stat st; if (!stat(path, &st)) return;
+    uint8_t hdr[0x38]; memset(hdr, 0, sizeof hdr); memcpy(hdr, "BTCDBTCD", 8); memcpy(hdr + 0x28, &nctl, 4); memcpy(hdr + 0x2c, &ncode, 4);
+    FILE *fp = fopen(path, "wb"); if (!fp) return; fwrite(hdr, 1, 0x38, fp); fwrite(code, 1, ncode, fp); fwrite(ctl, 1, nctl, fp); fclose(fp);
+}
 static void ad_set_shaders(Frame *f) {                 // nvnProgramSetShaders(program, n, const NVNshaderData *): the guest's has a 32-bit control pointer
     static NVNT_nvnProgramSetShaders impl; if (!impl) impl = nvn_impl_of("nvnProgramSetShaders");
     int n = (int)f->r[1]; if (n < 0 || n > 6) die("nvnProgramSetShaders: %d shaders", n);
     NVNshaderData h[6]; memset(h, 0, sizeof h);
     for (int i = 0; i < n; i++) { uint64_t data; memcpy(&data, g_mem + f->r[2] + 16 * i, 8); uint32_t ctl = rd32(f->r[2] + 16 * i + 8); h[i].data = (NVNbufferAddress)data; h[i].control = ctl ? g_mem + ctl : NULL; }
+    char nm[2][64] = {{0}, {0}};
+    for (int i = 0; i < n; i++) if (h[i].data && h[i].control) dump_shader((const uint8_t *)(uintptr_t)h[i].data, (const uint8_t *)h[i].control, nm[i & 1]);
+    if (n == 2 && nm[0][0] && nm[1][0] && getenv("A32_SHADER_DUMP")) {                         // the program's vertex / pixel pair, for the pair table
+        static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; char pl[1024]; snprintf(pl, sizeof pl, "%s/programs.txt", getenv("A32_SHADER_DUMP"));
+        pthread_mutex_lock(&mu); FILE *fp = fopen(pl, "a"); if (fp) { fprintf(fp, "%s %s\n", nm[0], nm[1]); fclose(fp); } pthread_mutex_unlock(&mu);
+    }
     f->r[0] = impl((NVNprogram *)(g_mem + f->r[0]), n, h) & 0xff;
 }
 static void ad_vertex_attrib_get_format(Frame *f) {    // (state, NVNformat *format, ptrdiff_t *offset)

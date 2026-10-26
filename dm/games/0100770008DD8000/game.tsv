@@ -15,3 +15,5 @@ mem_alias	0x10000000
 mem_stack	0x10000000
 app_pool	0x78000000
 sys_resource	0
+shader_groups	/nativeNX/=nativenx
+shader_note	Monster Hunter Generations Ultimate shaders (captured from nvnProgramSetShaders by the 32-bit host)

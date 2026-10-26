@@ -216,6 +216,28 @@ def glslc_program(d, h, size, label):
     if len(secs) < 2 or len(set(sts)) < len(sts) or any(not st or check(label, st, ctl, code) for st, (ctl, code) in zip(sts, secs)): return []
     return [(f'{label}#GLSLC@{h:#x}#var', st, ctl, code) for st, (ctl, code) in zip(sts, secs)]
 
+def captured_shaders(path, label):
+    """A shader the 32-bit host saved from nvnProgramSetShaders (dm/a32, A32_SHADER_DUMP): 'BTCDBTCD' + 0x30 header (control length +0x28, code length +0x2c) + code area + control section."""
+    d = open(path, 'rb').read()
+    nctl, ncode = struct.unpack_from('<II', d, 0x28)
+    code, ctl = d[0x38:0x38 + ncode], d[0x38 + ncode:0x38 + ncode + nctl]
+    st = glslc_stage(ctl, code)
+    if not st or check(label, st, ctl, code): return []
+    return [(label, st, ctl, code)]
+
+def captured_pairs(shd):
+    """(vertex key, pixel key) of every program the 32-bit host saw (programs.txt: one 'vertex.shdr pixel.shdr' line per nvnProgramSetShaders call)"""
+    out, keys = set(), {}
+    def key(nm):
+        if nm not in keys:
+            r = captured_shaders(os.path.join(shd, nm), nm); keys[nm] = skey(r[0][2], r[0][3]) if r else None
+        return keys[nm]
+    pl = os.path.join(shd, 'programs.txt')
+    for line in (open(pl).read().split('\n') if os.path.exists(pl) else []):
+        w = line.split()
+        if len(w) == 2 and key(w[0]) and key(w[1]): out.add((key(w[0]), key(w[1])))
+    return out
+
 def glslc_shaders(d, label, need=True):
     """GLSLC compiler outputs (838 in 13 Sentinels' main read-only segment, one stage each): from the magic 0x19866891, +0x44 = the whole output's length; an output of one stage holds exactly one control section with the code area right after it (control +0x20 = control length),
     one of several stages is read by its section headers (glslc_program).
@@ -1778,12 +1800,14 @@ def main():
         if not names and img.count(b'#version ') and 'glslcCompile' in main_imports(img) and glslc_module(os.path.dirname(os.path.abspath(mainnso))):
             print(f'[RED] main holds GLSL sources and imports glslcCompile, but there are no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation', flush=True)
         for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
+        shd = os.environ.get('DM_SHDR_CAPTURE') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'shdr_capture')      # shaders captured by the 32-bit host (dm/a32)
+        for nm in (sorted(f for f in os.listdir(shd) if f.endswith('.shdr')) if os.path.isdir(shd) else []): found += captured_shaders(os.path.join(shd, nm), f'/shdr_capture/{nm}')
         # Unreal Engine shader code archives decoded on the Mac (uepak.py): <version dir>/ue_shaders, or DM_UE_SHADERS; needed when the RomFS has Unreal paks
         ued = os.environ.get('DM_UE_SHADERS') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'ue_shaders')
         names = sorted(f for f in os.listdir(ued) if f.endswith('.ushaderbytecode')) if os.path.isdir(ued) else []
         if not names and uepak.unreal_paks(romfs, inline=False): red(f'the RomFS has Unreal paks, but there are no decoded shader code archives in {ued} (the NSP script writes them)')
         for nm in names: found += ue_shaders(open(os.path.join(ued, nm), 'rb').read(), f'/ue_shaders/{nm}')
-        results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
+        results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found) | (captured_pairs(shd) if os.path.isdir(shd) else set()), {}))
     zdicts = {k: v for r in romfs_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees

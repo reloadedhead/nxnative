@@ -248,8 +248,17 @@ static void on_fault(int sig, siginfo_t *si, void *uc_) {
 
 // ---- main -------------------------------------------------------------------------------------------------------------------------
 
+static int g_argc; static char **g_argv;
+extern void front_run(void (*guest)(void));
+static void guest_main(void);
 int main(int argc, char **argv) {
     if (argc < 2) die("usage: a32host <build dir> [-v]");
+    g_argc = argc; g_argv = argv;
+    front_run(guest_main);                                   // with DM_WINDOW the main thread runs the window and the guest gets its own thread
+    return 0;
+}
+static void guest_main(void) {
+    int argc = g_argc; char **argv = g_argv;
     g_build_dir = argv[1];
     g_verbose = argc > 2 && !strcmp(argv[2], "-v"); g_trace = getenv("A32_SVC") ? atoi(getenv("A32_SVC")) : 1;
     setvbuf(stderr, NULL, _IOLBF, 0);
@@ -298,5 +307,5 @@ int main(int argc, char **argv) {
     }
     LOG(">>> nnMain"); call_sym("nnMain", 0, 0, 0, 0);
     LOG("nnMain returned");
-    return 0;
+    exit(0);
 }

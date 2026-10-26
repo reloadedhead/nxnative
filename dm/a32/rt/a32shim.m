@@ -17,7 +17,19 @@ void crash_set_wait_dump(void (*fn)(void)) { (void)fn; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
 void dm_res_report_register(void (*fn)(uint32_t, const char *)) { (void)fn; }
 void *module_of(const void *p) { (void)p; return NULL; }                 // no 64-bit guest modules
-void *front_metal_layer(void) { return NULL; }                           // headless for now
+// the window (dm/host/front_mac.m, linked in) calls these: the controller state it collects is kept here for the hid service
+uint64_t a32_pad_buttons; int32_t a32_pad_axes[4];
+void dm_audio_suspend(int on) { (void)on; }
+void dm_focus_set(int st) { (void)st; }
+void dm_haptics_apple_init(void) {}
+void dm_haptics_apple_controller(int player, void *controller) { (void)player; (void)controller; }
+void dm_input_set(uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { a32_pad_buttons = b; a32_pad_axes[0] = lx; a32_pad_axes[1] = ly; a32_pad_axes[2] = rx; a32_pad_axes[3] = ry; }
+void dm_pad_set(uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { dm_input_set(b, lx, ly, rx, ry); }
+void dm_pad_set_player(int p, uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { if (p == 0) dm_input_set(b, lx, ly, rx, ry); }
+void dm_pad_players(uint32_t mask) { (void)mask; }
+uint32_t dm_player_npad(int p) { return p == 0 ? 0x20 : (uint32_t)(p - 1); }
+void dm_touch_set(const void *t, int n) { (void)t; (void)n; }
+int g_swkbd_min_chars;
 
 // page-fault hook (texture dirty tracking write-protects pages) and the "about to write guest memory from the host" hook
 static int (*g_fault)(void *, int, void *);
