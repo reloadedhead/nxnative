@@ -1,0 +1,17 @@
+# Game profile of Monster Hunter Generations Ultimate (Switch, 32-bit AArch32 title: run by the ahead-of-time recompiler in dm/a32, not by the 64-bit host).
+# Only the graphics layer reads this profile so far.
+title_id	0100770008dd8000
+program_id	0100770008DD8000
+name	Monster Hunter Generations Ultimate
+ipa	MonsterHunterGenerationsUltimate.ipa
+app_category	public.app-category.games
+build	v0	1.0.0	main=936abc6624fc8d8a72e277eb82576f52	subsdk0=c2774fa4cace9ecc6a712bfc839214c1	sdk=cb8e7f9a74a4a854ff013489ecc1e8b0
+package	v0
+shader_versions	v0
+modules	main subsdk0 sdk
+romfs_marker	nativeNX
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0x78000000
+sys_resource	0
