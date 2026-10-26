@@ -6,11 +6,12 @@
 #include "a32gfx.h"
 #include <sys/stat.h>
 
-#define ARENA_BASE 0x0e000000u
-#define ARENA_SIZE 0x00800000u
+#define ARENA_BASE 0x04000000u                  // guest memory the host hands out (objects it makes, buffers the guest reads): 64 MB, registered as in use
+#define ARENA_SIZE 0x04000000u
 static uint32_t g_arena_pos = ARENA_BASE;
 uint32_t a32_guest_alloc(uint32_t size, uint32_t align) {
     pthread_mutex_lock(&(pthread_mutex_t){PTHREAD_MUTEX_INITIALIZER});
+    static int reg; if (!reg) { reg = 1; a32_region_add(ARENA_BASE, ARENA_SIZE, 0xb, 3); }
     uint32_t a = (g_arena_pos + align - 1) & ~(align - 1);
     if (a + size > ARENA_BASE + ARENA_SIZE) die("guest arena exhausted");
     g_arena_pos = a + size; memset(g_mem + a, 0, size); return a;

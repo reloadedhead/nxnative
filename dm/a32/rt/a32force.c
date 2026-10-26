@@ -81,19 +81,7 @@ static void f_hid_bind_event(Frame *f) {
     if (!create || !sig) { LOG("hid: nn::os system event functions not found"); return; }
     a32_callback(create, ev, clear, 1, 0); a32_callback(sig, ev, 0, 0, 0);
 }
-// movie::Extractor / movie::Decoder: the movie decoder needs the GPU's video engine (nvdec through nvdrv), which is not here. The constructors give an object whose every virtual
-// method fails, so the game's movie player reports an error and skips the movie
-extern uint32_t a32_hook_add(const char *name, void (*fn)(Frame *)); extern uint32_t a32_guest_alloc(uint32_t size, uint32_t align);
-static void f_movie_fail(Frame *f) { static int n; if (n++ < 20) LOG("movie: %s called from %s: fails", a32_hook_current_name(), where(f->r[14])); f->r[0] = 1; }
-static void f_movie_ctor(Frame *f) {
-    static uint32_t vt; if (!vt) { vt = a32_guest_alloc(4 * 160, 4); uint32_t h = a32_hook_add("movie_fail", f_movie_fail); for (int i = 0; i < 160; i++) wr32(vt + 4 * (uint32_t)i, h); }
-    wr32(f->r[0], vt);
-}
 const ForceEnt a32_force[] = {
-    { "_ZN5movie9ExtractorC1ENS_13ContainerTypeENS_9CacheSizeE", f_movie_ctor }, { "_ZN5movie9ExtractorC2ENS_13ContainerTypeENS_9CacheSizeE", f_movie_ctor },
-    { "_ZN5movie9ExtractorC1ENS_13ContainerTypeE", f_movie_ctor }, { "_ZN5movie9ExtractorC2ENS_13ContainerTypeE", f_movie_ctor },
-    { "_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", f_movie_ctor }, { "_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", f_movie_ctor },
-    { "_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", f_movie_ctor }, { "_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", f_movie_ctor },
     { "_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", f_hid_bind_event },
     { "_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", f_hid_state }, { "_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", f_hid_state },
     { "_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", f_hid_state_none }, { "_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", f_hid_state_none },

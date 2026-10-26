@@ -33,7 +33,7 @@ static HEnt *handle_get(uint32_t h) { uint32_t i = h - 0xd000; return (h >= 0xd0
 struct GThread {
     pthread_t th; ThreadCtx ctx; uint32_t handle, id, entry, arg, stack_top, tls; int prio, core, started, exited;
     uint32_t wait_addr, wait_key; int waiting_lock, waiting_key, woken;     // address arbitration / process-wide key waits
-    uint64_t mask;
+    uint64_t mask; int cancel_sync; uint32_t cb_sp;                          // cb_sp: the stack of a host-made helper thread, below which the host may call guest code
     struct GThread *next;
 };
 static GThread *g_threads; static uint32_t g_next_tid = 1; static __thread GThread *t_self;
@@ -258,6 +258,7 @@ void a32_svc_c(uint32_t num, Frame *f) {
         pthread_exit(NULL);
     }
     case 0x0b: {                                   // SleepThread(r0:r1 = ns)
+        if (g_trace >= 4) { static __thread int shown; if (!shown++) { LOG("thread %u sleeps", t_self->id); dump_regs(f); } }
         int64_t ns = (int64_t)(((uint64_t)r[1] << 32) | r[0]);
         if (ns <= 0) { sched_yield(); } else { struct timespec ts = {(time_t)(ns / 1000000000), (long)(ns % 1000000000)}; nanosleep(&ts, NULL); }
         r[0] = KR_OK; return;
@@ -287,6 +288,7 @@ void a32_svc_c(uint32_t num, Frame *f) {
         pthread_mutex_lock(&g_big);
         struct timespec ts; if (to > 0) ts = deadline_after((uint64_t)to);
         for (;;) {
+            if (t_self->cancel_sync) { t_self->cancel_sync = 0; pthread_mutex_unlock(&g_big); r[0] = 0xec01; return; }
             for (int i = 0; i < n; i++) {
                 uint32_t h = rd32(hp + 4 * i); HEnt *e = handle_get(h);
                 if (!e) { pthread_mutex_unlock(&g_big); r[0] = KR_INVALID_HANDLE; return; }
@@ -300,7 +302,11 @@ void a32_svc_c(uint32_t num, Frame *f) {
             else if (pthread_cond_timedwait(&g_big_cv, &g_big, &ts) == ETIMEDOUT) { pthread_mutex_unlock(&g_big); r[0] = KR_TIMEOUT; return; }
         }
     }
-    case 0x19: r[0] = KR_OK; return;                // CancelSynchronization
+    case 0x19: {                                   // CancelSynchronization(thread): its WaitSynchronization (now or the next one) returns Cancelled
+        GThread *t = thread_of(r[0]); if (!t) { r[0] = KR_INVALID_HANDLE; return; }
+        pthread_mutex_lock(&g_big); t->cancel_sync = 1; pthread_cond_broadcast(&g_big_cv); pthread_mutex_unlock(&g_big);
+        r[0] = KR_OK; return;
+    }
     case 0x1a: r[0] = arbitrate_lock(r[0], r[1], r[2]); return;
     case 0x1b: r[0] = arbitrate_unlock(r[0]); return;
     case 0x1c: r[0] = wait_key_atomic(r[0], r[1], r[2], (int64_t)(((uint64_t)r[4] << 32) | r[3])); return;
@@ -392,4 +398,20 @@ uint32_t a32_new_shmem_handle(uint32_t size, uint8_t **host) {
     ShMem *sm = calloc(1, sizeof *sm); sm->fd = fd; sm->size = size;
     *host = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); if (*host == MAP_FAILED) die("mmap shared memory");
     pthread_mutex_lock(&g_big); uint32_t h = handle_new(H_SHMEM, sm); pthread_mutex_unlock(&g_big); return h;
+}
+
+uint32_t a32_cb_sp(void) { return t_self ? t_self->cb_sp : 0; }
+// a thread of the host that can call guest code (a32_callback): its own TLS block and guest stack
+extern uint32_t a32_guest_alloc(uint32_t size, uint32_t align);
+typedef struct { void (*fn)(void *); void *arg; GThread *t; } HelperStart;
+static void *helper_main(void *p) { HelperStart *h = p; t_self = h->t; h->fn(h->arg); return NULL; }
+void *a32_spawn_guest_thread(void (*fn)(void *), void *arg, size_t stack) {
+    GThread *t = calloc(1, sizeof *t);
+    pthread_mutex_lock(&g_big); t->id = g_next_tid++; t->next = g_threads; g_threads = t; pthread_mutex_unlock(&g_big);
+    t->tls = alloc_tls(t->id); t->ctx.mem = g_mem; t->ctx.tls = t->tls; t->started = 1;
+    uint32_t base = a32_guest_alloc((uint32_t)stack, 16); t->stack_top = base + (uint32_t)stack; t->cb_sp = t->stack_top;
+    HelperStart *h = malloc(sizeof *h); h->fn = fn; h->arg = arg; h->t = t;
+    pthread_t th; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 1u << 20);
+    if (pthread_create(&th, &a, helper_main, h)) die("cannot create a helper thread");
+    pthread_detach(th); return t;
 }

@@ -78,6 +78,8 @@ static int storage_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, 
         uint64_t off, len; memcpy(&off, in, 8); memcpy(&len, in + 8, 8);
         if (c->nb < 1) { LOG("fs: IStorage::Read without an output buffer"); return 0x2ea; }
         if (len > c->b[0].size) len = c->b[0].size;
+        static int trace = -1; if (trace < 0) trace = getenv("A32_FS_TRACE") != NULL;
+        if (trace && off >= g_rom.data_off) LOG("fs: IStorage::Read data offset %#llx length %#llx", (unsigned long long)off, (unsigned long long)len);
         romfs_read(off, g_mem + c->b[0].addr, len); return 0;
     }
     case 4: romfs_load(); ipc_put64(c, g_rom.total); return 0;

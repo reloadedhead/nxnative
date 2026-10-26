@@ -46,6 +46,7 @@ static uint32_t hook_for(const char *name, void (*fn)(Frame *)) {
 static const ForceEnt *force_find(const char *name) {
     for (unsigned i = 0; i < a32_nforce; i++) if (!strcmp(a32_force[i].name, name)) return &a32_force[i];
     for (unsigned i = 0; i < a32_nforce_gfx; i++) if (!strcmp(a32_force_gfx[i].name, name)) return &a32_force_gfx[i];
+    for (unsigned i = 0; i < a32_nforce_movie; i++) if (!strcmp(a32_force_movie[i].name, name)) return &a32_force_movie[i];
     return NULL;
 }
 // a host entry point created at run time (the NVN functions the game asks nvnBootstrapLoader / nvnDeviceGetProcAddress for)
@@ -218,13 +219,22 @@ void a32_hook_c(uint32_t addr, Frame *f) {
     f->r[0] = 0;
 }
 
-// call a guest function from inside a hook (a callback the host was given), on the calling thread's stack below the hook's caller
-uint32_t a32_callback(uint32_t pc, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
-    if (!t_frame) die("a32_callback outside a hook");
-    Frame *saved = t_frame; Frame copy = *saved;
-    uint32_t r = a32_call(a32_cur_ctx(), pc, a0, a1, a2, a3, (saved->r[13] - 256) & ~7u);
-    *saved = copy; t_frame = saved; return r;
+// call a guest function from the host, on the calling guest thread: inside a hook below the hook's caller, on a helper guest thread below its own stack pointer.
+// More than four arguments: the rest go on the guest stack (AAPCS)
+extern uint32_t a32_cb_sp(void);
+uint32_t a32_callbackv(uint32_t pc, int n, const uint32_t *args) {
+    uint32_t base = t_frame ? t_frame->r[13] : a32_cb_sp();
+    if (!base) die("a32_callback outside a guest thread");
+    Frame *saved = t_frame, copy; if (saved) copy = *saved;
+    uint32_t sp = (base - 256 - 4u * (uint32_t)(n > 4 ? n - 4 : 0)) & ~7u, regs[16] = {0};
+    for (int i = 0; i < n && i < 4; i++) regs[i] = args[i];
+    for (int i = 4; i < n; i++) wr32(sp + 4u * (uint32_t)(i - 4), args[i]);
+    regs[13] = sp; regs[14] = HOOK_BASE;
+    uint32_t r = a32_enter(a32_cur_ctx(), regs, pc);
+    if (saved) { *saved = copy; t_frame = saved; }
+    return r;
 }
+uint32_t a32_callback(uint32_t pc, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) { uint32_t a[4] = {a0, a1, a2, a3}; return a32_callbackv(pc, 4, a); }
 
 // ---- faults ---------------------------------------------------------------------------------------------------------------------
 extern int a32_gfx_fault(void *addr, int is_write, void *uc);
