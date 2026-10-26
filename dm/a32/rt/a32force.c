@@ -5,6 +5,7 @@
 #include "a32host.h"
 #include "a32force.h"
 #include <time.h>
+extern const char *a32_hook_current_name(void);
 static void f_noop(Frame *f) { f->r[0] = 0; }
 // ---- nn::time: the host answers in UTC from the Mac's clock ----
 static void wr64(uint32_t a, int64_t v) { memcpy(g_mem + a, &v, 8); }
@@ -36,7 +37,67 @@ static void f_abort(Frame *f) {
     for (int k = 0; k < 3; k++) { uint32_t v = rd32(f->r[13] + 4 * k); if (v > 0x100000 && v < 0x10000000 && !(v & 0xf0000000)) { const char *t = gstr(v); int ok = 1; for (int i = 0; i < 40 && t[i]; i++) if ((unsigned char)t[i] < 9) ok = 0; if (ok && t[0]) fprintf(stderr, "   arg: %.100s\n", t); } }
     dump_regs(f); fflush(stderr); _exit(6);
 }
+
+// ---- nn::hid: the controller state comes from the window's front end (keyboard / game controller, see a32shim.m), as in the 64-bit host (dm/host/hle_hid.c):
+// the SDK's npad calls are taken over by name instead of emulating the hid shared memory. Player 1 is a full-key controller on No1; A32_KEYS="seconds:key[+key],..." presses keys for a moment (A B X Y L R ZL ZR Plus Minus Left Up Right Down)
+extern uint64_t a32_pad_buttons; extern int32_t a32_pad_axes[4];
+typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attributes, pad; } NpadState;
+static uint64_t scripted_keys(void) {
+    static const char *spec; static int init; static uint64_t t0;
+    if (!init) { init = 1; spec = getenv("A32_KEYS"); struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); t0 = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000; }
+    if (!spec) return 0;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ((uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000 - t0) / 1000.0;
+    static const char *names[] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
+    uint64_t b = 0; const char *p = spec;
+    while (*p) {
+        double at = atof(p); const char *c = strchr(p, ':'); if (!c) break; c++;
+        const char *e = c + strcspn(c, ",");
+        if (now >= at && now < at + 0.25) for (const char *k = c; k < e; ) {
+            const char *pl = k + strcspn(k, "+,"); size_t n = (size_t)(pl - k);
+            for (int i = 0; i < 16; i++) if (strlen(names[i]) == n && !strncmp(k, names[i], n)) b |= 1ull << i;
+            k = *pl == '+' ? pl + 1 : pl;
+        }
+        p = *e ? e + 1 : e;
+    }
+    return b;
+}
+static void hid_fill(NpadState *s, uint32_t id) {
+    static int64_t sampling = 1 << 16; memset(s, 0, sizeof *s); s->sampling = ++sampling;
+    if (id != 0 && id != 0x20) return;                                          // No1 and the handheld npad report the controller
+    uint64_t b = (a32_pad_buttons | scripted_keys()) & 0xffffull; int32_t a[4]; memcpy(a, a32_pad_axes, sizeof a);
+    s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
+    if (s->lx < -0x4000) b |= 1u << 16; if (s->ly > 0x4000) b |= 1u << 17; if (s->lx > 0x4000) b |= 1u << 18; if (s->ly < -0x4000) b |= 1u << 19;
+    if (s->rx < -0x4000) b |= 1u << 20; if (s->ry > 0x4000) b |= 1u << 21; if (s->rx > 0x4000) b |= 1u << 22; if (s->ry < -0x4000) b |= 1u << 23;
+    s->buttons = b; s->attributes = 1;                                          // connected
+    { static uint64_t last = ~0ull; static unsigned calls; calls++; if (b != last) { last = b; LOG("hid: npad %u buttons %#llx (call %u)", id, (unsigned long long)b, calls); } }
+}
+static void f_hid_state(Frame *f) { static int n; if (n++ < 3) LOG("hid: GetNpadState id %#x from %s", rd32(f->r[1]), where(f->r[14])); NpadState s; hid_fill(&s, rd32(f->r[1])); memcpy(g_mem + f->r[0], &s, sizeof s); }
+static void f_hid_state_none(Frame *f) { NpadState s; hid_fill(&s, 0xffffffffu); memcpy(g_mem + f->r[0], &s, sizeof s); }      // styles the host has no controller of
+static void f_hid_style(Frame *f) { static int n; if (n++ < 3) LOG("hid: GetNpadStyleSet id %#x from %s", rd32(f->r[0]), where(f->r[14])); uint32_t id = rd32(f->r[0]); f->r[0] = id == 0 ? 1 : id == 0x20 ? 2 : 0; }                                                  // GetNpadStyleSet: No1 is a full-key controller
+// BindNpadStyleSetUpdateEvent(id, SystemEventType *, clear mode): the game builds its pad object when this event fires, so it is created and signaled at once (a controller is attached from the start)
+extern uint32_t a32_find_symbol(const char *name); extern uint32_t a32_callback(uint32_t pc, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3);
+static void f_hid_bind_event(Frame *f) {
+    uint32_t ev = f->r[1], clear = f->r[2], create = a32_find_symbol("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb"), sig = a32_find_symbol("_ZN2nn2os17SignalSystemEventEPNS0_15SystemEventTypeE");
+    if (!create || !sig) { LOG("hid: nn::os system event functions not found"); return; }
+    a32_callback(create, ev, clear, 1, 0); a32_callback(sig, ev, 0, 0, 0);
+}
+// movie::Extractor / movie::Decoder: the movie decoder needs the GPU's video engine (nvdec through nvdrv), which is not here. The constructors give an object whose every virtual
+// method fails, so the game's movie player reports an error and skips the movie
+extern uint32_t a32_hook_add(const char *name, void (*fn)(Frame *)); extern uint32_t a32_guest_alloc(uint32_t size, uint32_t align);
+static void f_movie_fail(Frame *f) { static int n; if (n++ < 20) LOG("movie: %s called from %s: fails", a32_hook_current_name(), where(f->r[14])); f->r[0] = 1; }
+static void f_movie_ctor(Frame *f) {
+    static uint32_t vt; if (!vt) { vt = a32_guest_alloc(4 * 160, 4); uint32_t h = a32_hook_add("movie_fail", f_movie_fail); for (int i = 0; i < 160; i++) wr32(vt + 4 * (uint32_t)i, h); }
+    wr32(f->r[0], vt);
+}
 const ForceEnt a32_force[] = {
+    { "_ZN5movie9ExtractorC1ENS_13ContainerTypeENS_9CacheSizeE", f_movie_ctor }, { "_ZN5movie9ExtractorC2ENS_13ContainerTypeENS_9CacheSizeE", f_movie_ctor },
+    { "_ZN5movie9ExtractorC1ENS_13ContainerTypeE", f_movie_ctor }, { "_ZN5movie9ExtractorC2ENS_13ContainerTypeE", f_movie_ctor },
+    { "_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", f_movie_ctor }, { "_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", f_movie_ctor },
+    { "_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", f_movie_ctor }, { "_ZN5movie7DecoderC2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", f_movie_ctor },
+    { "_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", f_hid_bind_event },
+    { "_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", f_hid_state }, { "_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", f_hid_state },
+    { "_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", f_hid_state_none }, { "_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", f_hid_state_none },
+    { "_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", f_hid_state_none }, { "_ZN2nn3hid15GetNpadStyleSetERKj", f_hid_style },
     // the inline software keyboard: the game initialises it at startup and never needs it to show anything (no library applet exists here)
     { "_ZN2nn5swkbd14InlineKeyboard10InitializeEPv", f_noop },
     { "_ZN2nn5swkbd14InlineKeyboard11SetUtf8ModeEb", f_noop },

@@ -154,6 +154,7 @@ static uint32_t a32_call(ThreadCtx *c, uint32_t pc, uint32_t a0, uint32_t a1, ui
     regs[0] = a0; regs[1] = a1; regs[2] = a2; regs[3] = a3; regs[13] = sp; regs[14] = HOOK_BASE;
     return a32_enter(c, regs, pc);
 }
+uint32_t a32_find_symbol(const char *name) { return sym_get(name); }
 static uint32_t call_sym(const char *name, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
     uint32_t a = sym_get(name); if (!a) die("required symbol %s not found", name);
     return a32_call(a32_main_ctx(), a, a0, a1, a2, a3, g_main_sp);
