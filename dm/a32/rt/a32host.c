@@ -270,11 +270,54 @@ int main(int argc, char **argv) {
     front_run(guest_main);                                   // with DM_WINDOW the main thread runs the window and the guest gets its own thread
     return 0;
 }
+
+// A32_DUMP="s1,s2,...": the guest heap is written to $A32_DUMP_DIR/heap_<n>.bin at those seconds after start (debugging: find what changes with the input)
+#include <pthread.h>
+static void *dump_thread(void *arg) {
+    (void)arg; const char *dir = getenv("A32_DUMP_DIR") ? getenv("A32_DUMP_DIR") : "/tmp"; char spec[256]; snprintf(spec, sizeof spec, "%s", getenv("A32_DUMP"));
+    extern uint64_t a32_keys_t0_ms; while (!a32_keys_t0_ms) usleep(50000);                         // seconds are counted from the scripted key clock
+    struct timespec t0 = { (time_t)(a32_keys_t0_ms / 1000), (long)(a32_keys_t0_ms % 1000) * 1000000 }; int n = 0;
+    for (char *tok = strtok(spec, ","); tok; tok = strtok(NULL, ","), n++) {
+        double at = atof(tok);
+        for (;;) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double e = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9; if (e >= at) break; usleep(20000); }
+        char path[512]; snprintf(path, sizeof path, "%s/heap_%d.bin", dir, n); FILE *f = fopen(path, "wb");
+        if (f) { fwrite(g_mem + HEAP_BASE, 1, g_heap_size, f); fclose(f); fprintf(stderr, "[a32] dumped the heap (%u bytes) to %s\n", g_heap_size, path); }
+    }
+    return NULL;
+}
+
+// A32_WATCHF=<guest address>[,<address>...]: those floats are printed once a second (debugging)
+static void *watchf_thread(void *arg) {
+    (void)arg; char spec[256]; snprintf(spec, sizeof spec, "%s", getenv("A32_WATCHF")); uint32_t a[8]; int n = 0;
+    for (char *t = strtok(spec, ","); t && n < 8; t = strtok(NULL, ",")) a[n++] = (uint32_t)strtoul(t, NULL, 0);
+    int ms = getenv("A32_WATCHF_MS") ? atoi(getenv("A32_WATCHF_MS")) : 1000; char last[256] = ""; struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (;;) {
+        usleep((useconds_t)ms * 1000); char line[256]; int o = 0;
+        for (int i = 0; i < n; i++) { float v; memcpy(&v, g_mem + a[i], 4); o += snprintf(line + o, sizeof line - (size_t)o, " %#x=%.3f", a[i], v); }
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double e = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9;
+        if (ms >= 1000 || strcmp(line, last)) { fprintf(stderr, "[a32] watch %.2f:%s\n", e, line); snprintf(last, sizeof last, "%s", line); }
+    }
+    return NULL;
+}
+
+// A32_POKEF="addr:value:seconds": at that many seconds on the scripted key clock the float is written into guest memory (debugging experiments)
+static void *pokef_thread(void *arg) {
+    (void)arg; char spec[128]; snprintf(spec, sizeof spec, "%s", getenv("A32_POKEF")); char *a = strtok(spec, ":"), *v = strtok(NULL, ":"), *t = strtok(NULL, ":");
+    if (!a || !v || !t) return NULL;
+    extern uint64_t a32_keys_t0_ms; while (!a32_keys_t0_ms) usleep(50000);
+    struct timespec t0 = { (time_t)(a32_keys_t0_ms / 1000), (long)(a32_keys_t0_ms % 1000) * 1000000 };
+    for (;;) { struct timespec n; clock_gettime(CLOCK_MONOTONIC, &n); double e = (double)(n.tv_sec - t0.tv_sec) + (double)(n.tv_nsec - t0.tv_nsec) / 1e9; if (e >= atof(t)) break; usleep(20000); }
+    float f = (float)atof(v); memcpy(g_mem + (uint32_t)strtoul(a, NULL, 0), &f, 4); fprintf(stderr, "[a32] poked %s = %f\n", a, f);
+    return NULL;
+}
 static void on_usr1(int sig) { (void)sig; g_trace = g_trace ? 0 : 3; }
 static void on_usr2(int sig) { (void)sig; ring_dump(); }
 static void guest_main(void) {
     int argc = g_argc; char **argv = g_argv;
     g_build_dir = argv[1];
+    if (getenv("A32_POKEF")) { pthread_t th; pthread_create(&th, NULL, pokef_thread, NULL); pthread_detach(th); }
+    if (getenv("A32_WATCHF")) { pthread_t th; pthread_create(&th, NULL, watchf_thread, NULL); pthread_detach(th); }
+    if (getenv("A32_DUMP")) { pthread_t th; pthread_create(&th, NULL, dump_thread, NULL); pthread_detach(th); }
     if (getenv("A32_TICK_OFFSET")) a32_tick_offset = (uint64_t)(atof(getenv("A32_TICK_OFFSET")) * 19200000.0);
     if (getenv("A32_TICK_SCALE")) a32_tick_scale = (uint64_t)atoll(getenv("A32_TICK_SCALE"));
     g_verbose = argc > 2 && !strcmp(argv[2], "-v"); g_trace = getenv("A32_SVC") ? atoi(getenv("A32_SVC")) : 1;

@@ -57,13 +57,17 @@ static void romfs_read(uint64_t off, uint8_t *dst, uint64_t size) {
         uint64_t n = (nxt < end ? nxt : end) - pos;
         if (pos < fend) {
             uint64_t m = (fend < end ? fend : end) - pos;
-            if (g_rom.fd_idx != hit) {
-                if (g_rom.fd >= 0) close(g_rom.fd);
+            // a small direct-mapped cache of open files: reads alternate between a music stream and the archives, reopening on every switch cost more than the reads
+            static struct { int idx, fd; } fdc[64]; static int fdc_init;
+            if (!fdc_init) { fdc_init = 1; for (int i = 0; i < 64; i++) fdc[i].idx = -1, fdc[i].fd = -1; }
+            int slot = hit & 63;
+            if (fdc[slot].idx != hit) {
+                if (fdc[slot].fd >= 0) close(fdc[slot].fd);
                 char p[2400]; snprintf(p, sizeof p, "%s/%s", g_rom.root, fl->path);
-                g_rom.fd = open(p, O_RDONLY); g_rom.fd_idx = hit;
-                if (g_rom.fd < 0) { LOG("fs: cannot open %s: %s", p, strerror(errno)); }
+                fdc[slot].fd = open(p, O_RDONLY); fdc[slot].idx = hit;
+                if (fdc[slot].fd < 0) { LOG("fs: cannot open %s: %s", p, strerror(errno)); }
             }
-            if (g_rom.fd >= 0) { ssize_t r = pread(g_rom.fd, dst + (pos - off), m, (off_t)(pos - fl->off)); (void)r; }
+            if (fdc[slot].fd >= 0) { ssize_t r = pread(fdc[slot].fd, dst + (pos - off), m, (off_t)(pos - fl->off)); (void)r; }
         }
         pos += n;
     }

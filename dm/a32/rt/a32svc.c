@@ -300,7 +300,7 @@ void a32_svc_c(uint32_t num, Frame *f) {
                 uint32_t h = rd32(hp + 4 * i); HEnt *e = handle_get(h);
                 if (!e) { pthread_mutex_unlock(&g_big); r[0] = KR_INVALID_HANDLE; return; }
                 int sig = 0;
-                if (e->type == H_EVENT_R || e->type == H_EVENT_W) { Event *ev = e->obj; sig = ev->signaled; if (sig && !ev->manual) ev->signaled = 0; }
+                if (e->type == H_EVENT_R || e->type == H_EVENT_W) { Event *ev = e->obj; sig = ev->signaled; }          // a readable event stays signalled when a wait on it succeeds; the SDK clears it (ClearEvent / ResetSignal) when its mode asks
                 else if (e->type == H_THREAD) { sig = ((GThread *)e->obj)->exited; }
                 if (sig) { pthread_mutex_unlock(&g_big); r[0] = KR_OK; r[1] = (uint32_t)i; return; }
             }

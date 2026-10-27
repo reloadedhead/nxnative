@@ -44,10 +44,11 @@ static void f_abort(Frame *f) {
 // the SDK's npad calls are taken over by name instead of emulating the hid shared memory. Player 1 is a full-key controller on No1; A32_KEYS="seconds:key[+key],..." presses keys for a moment (A B X Y L R ZL ZR Plus Minus Left Up Right Down)
 extern uint64_t a32_pad_buttons; extern int32_t a32_pad_axes[4];
 typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attributes, pad; } NpadState;
+uint64_t a32_keys_t0_ms;                                                 // when the scripted key clock started (A32_DUMP is relative to it)
 static int32_t scripted_ax[2];                                              // A32_KEYS stick entries SU SD SL SR: the left stick pushed up, down, left, right
 static uint64_t scripted_keys(void) {
     static const char *spec; static int init; static uint64_t t0;
-    if (!init) { init = 1; spec = getenv("A32_KEYS"); struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); t0 = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000; }
+    if (!init) { init = 1; spec = getenv("A32_KEYS"); struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); t0 = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000; a32_keys_t0_ms = t0; }
     if (!spec) return 0;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ((uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000 - t0) / 1000.0;
     static const char *names[] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
@@ -58,7 +59,7 @@ static uint64_t scripted_keys(void) {
         if (now >= at && now < at + 0.25) for (const char *k = c; k < e; ) {
             const char *pl = k + strcspn(k, "+,"); size_t n = (size_t)(pl - k);
             for (int i = 0; i < 16; i++) if (strlen(names[i]) == n && !strncmp(k, names[i], n)) b |= 1ull << i;
-            if (n == 2 && k[0] == 'S') { if (k[1] == 'U') scripted_ax[1] = 30000; if (k[1] == 'D') scripted_ax[1] = -30000; if (k[1] == 'L') scripted_ax[0] = -30000; if (k[1] == 'R') scripted_ax[0] = 30000; }
+            if (n == 2 && k[0] == 'S') { { int32_t mag = getenv("A32_STICK") ? atoi(getenv("A32_STICK")) : 30000; if (k[1] == 'U') scripted_ax[1] = mag; if (k[1] == 'D') scripted_ax[1] = -mag; if (k[1] == 'L') scripted_ax[0] = -mag; if (k[1] == 'R') scripted_ax[0] = mag; } }
             k = *pl == '+' ? pl + 1 : pl;
         }
         p = *e ? e + 1 : e;

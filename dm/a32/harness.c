@@ -42,3 +42,7 @@ int main(int argc, char **argv) {
     fclose(fo);
     return 0;
 }
+
+// symbols the lifted code of some instruction words refers to (the runtime provides them in the game)
+unsigned long long a32_tick_scale = 1, a32_tick_offset = 0;
+void a32_svc_gate(void) {}
