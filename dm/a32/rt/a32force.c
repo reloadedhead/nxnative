@@ -107,7 +107,8 @@ static void hid_fill(NpadState *s, uint32_t id) {
     if (s->lx < -0x4000) b |= 1u << 16; if (s->ly > 0x4000) b |= 1u << 17; if (s->lx > 0x4000) b |= 1u << 18; if (s->ly < -0x4000) b |= 1u << 19;
     if (s->rx < -0x4000) b |= 1u << 20; if (s->ry > 0x4000) b |= 1u << 21; if (s->rx > 0x4000) b |= 1u << 22; if (s->ry < -0x4000) b |= 1u << 23;
     s->buttons = b; s->attributes = 1;                                          // connected
-    { static uint64_t last = ~0ull; static unsigned calls; calls++; if (b != last) { last = b; LOG("hid: npad %u buttons %#llx (call %u)", id, (unsigned long long)b, calls); } }
+    { static uint64_t last = ~0ull; static int lq[2]; static unsigned calls; calls++; int q[2] = { s->lx < -0x4000 ? -1 : s->lx > 0x4000, s->ly < -0x4000 ? -1 : s->ly > 0x4000 };
+      if (b != last || q[0] != lq[0] || q[1] != lq[1]) { last = b; lq[0] = q[0]; lq[1] = q[1]; LOG("hid: npad %u buttons %#llx stick %d,%d (call %u)", id, (unsigned long long)b, s->lx, s->ly, calls); } }
 }
 static void f_hid_state(Frame *f) { static int n; if (n++ < 3) LOG("hid: GetNpadState id %#x from %s", rd32(f->r[1]), where(f->r[14])); NpadState s; hid_fill(&s, rd32(f->r[1])); memcpy(g_mem + f->r[0], &s, sizeof s); }
 static void f_hid_state_none(Frame *f) { NpadState s; hid_fill(&s, 0xffffffffu); memcpy(g_mem + f->r[0], &s, sizeof s); }      // styles the host has no controller of

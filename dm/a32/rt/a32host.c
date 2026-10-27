@@ -18,6 +18,7 @@ typedef struct {
 static Mod g_mod[MAX_MOD]; static int g_nmod;
 uint8_t *g_mem;                 // guest address 0 = g_mem
 const char *g_build_dir;
+uint64_t a32_tick_scale = 1, a32_tick_offset;      // A32_TICK_OFFSET=<seconds> adds that much to the guest counter                                  // debugging: A32_TICK_SCALE=n makes the guest's system counter run n times fast
 int g_trace; uint32_t g_heap_size; uint8_t g_unimpl_svc_seen[256];
 static int g_verbose;
 void die(const char *fmt, ...) { va_list ap; va_start(ap, fmt); fputs("a32host: ", stderr); vfprintf(stderr, fmt, ap); fputc('\n', stderr); va_end(ap); exit(1); }
@@ -274,6 +275,8 @@ static void on_usr2(int sig) { (void)sig; ring_dump(); }
 static void guest_main(void) {
     int argc = g_argc; char **argv = g_argv;
     g_build_dir = argv[1];
+    if (getenv("A32_TICK_OFFSET")) a32_tick_offset = (uint64_t)(atof(getenv("A32_TICK_OFFSET")) * 19200000.0);
+    if (getenv("A32_TICK_SCALE")) a32_tick_scale = (uint64_t)atoll(getenv("A32_TICK_SCALE"));
     g_verbose = argc > 2 && !strcmp(argv[2], "-v"); g_trace = getenv("A32_SVC") ? atoi(getenv("A32_SVC")) : 1;
     setvbuf(stderr, NULL, _IOLBF, 0);
     g_mem = mmap(NULL, (1ull << 32) + (1ull << 20), PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);

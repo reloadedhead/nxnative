@@ -455,7 +455,7 @@ class Lifter(VfpMixin, NeonMixin):
             if 15 in (rt, rt2) or rt == rt2: raise Unsupported('cntvct into pc')
             # the host counter's frequency is read, not assumed (24 MHz on some Macs, 1 GHz on others): ticks = q * 19.2M + (r * 19.2M) / f with q, r = divmod(counter, f), which cannot overflow
             out += ['mrs x16, cntvct_el0', 'mrs x17, cntfrq_el0', 'udiv x15, x16, x17', 'msub x16, x15, x17, x16', 'movz x19, #0xf800', 'movk x19, #0x124, lsl #16',
-                    'mul x15, x15, x19', 'mul x16, x16, x19', 'udiv x16, x16, x17', 'add x16, x16, x15', 'mov w%d, w16' % rt, 'lsr x16, x16, #32', 'mov w%d, w16' % rt2]; return True
+                    'mul x15, x15, x19', 'mul x16, x16, x19', 'udiv x16, x16, x17', 'add x16, x16, x15', 'adrp x15, _a32_tick_scale@PAGE', 'ldr x15, [x15, _a32_tick_scale@PAGEOFF]', 'mul x16, x16, x15', 'adrp x15, _a32_tick_offset@PAGE', 'ldr x15, [x15, _a32_tick_offset@PAGEOFF]', 'add x16, x16, x15', 'mov w%d, w16' % rt, 'lsr x16, x16, #32', 'mov w%d, w16' % rt2]; return True
         if w & 0x0fff0fdf == 0x0e070f9a and bits(w, 3, 0) == 10:             # mcr p15, 0, Rt, c7, c10, {4,5}: the pre-ARMv7 barrier encodings (dsb / dmb)
             out.append('dsb ish' if bits(w, 5, 5) == 0 else 'dmb ish'); return True
         if w & 0x0fff0fff == 0x0e070f95:                                      # mcr p15, 0, Rt, c7, c5, 4 (isb)
