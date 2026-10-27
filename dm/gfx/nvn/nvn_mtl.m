@@ -4070,7 +4070,7 @@ static struct {
     uint64_t tex[6][NTEX], samp[6][128], img[6][32];
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];
     p_poly_offset po; float vp[16][4]; float dr[2]; int has_vp; int depth_clamp; uint8_t vp_sw[16][4];   // vp_sw: viewport swizzles XOR the identity (p_vp_swizzle)
-    float blend_color[4]; int64_t copy_stride, copy_img_stride;
+    float blend_color[4], alpha_ref; int64_t copy_stride, copy_img_stride;
     p_tf_bind tf[4]; uint64_t tf_off[4]; int tf_on, rast_discard;   // transform feedback buffers, bytes written into each since Begin, capture active; rasterizer discard (tf_draw)
     int tex_base, samp_base;   // host-table bases of the texture / sampler pool bound (OP_SET_TEX_POOL / OP_SET_SAMP_POOL), for handles read at replay from uniform buffers (encode_args)
 } S;
@@ -5341,6 +5341,48 @@ static void pso_prebuild_bg(void) {   // after the prewarm, in the app without a
 }
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused);
 static id<MTLFunction> ms_fs_override(NvShader *fs);   // DM_NVN_MAGSCAN (defined before draw)
+// Alpha test (nvnColorStateSetAlphaTest + nvnCommandBufferSetAlphaRef): Maxwell compares colour output 0's alpha with the reference after the fragment shader and drops the fragment when the
+// comparison fails; Metal has no such stage, so the test is added to the shader. The translated shader's source (<key>.metal, next to its metallib) is compiled once more with the test
+// inserted before its only return and two function constants (the NVN function and the reference), specialized for each pair the game uses (MHGU's foliage, grass and fences: GREATER 0 /
+// GEQUAL 0.5: without it the transparent part of every leaf card is drawn as an opaque rectangle). Pipelines made from such a function are keyed by it (k.fsfn) and built on the submit thread
+// like the diagnostic overrides, so the first draw of each costs a compile
+static os_unfair_lock g_at_lock = OS_UNFAIR_LOCK_INIT; static NSMutableDictionary<NSString *, id> *g_at_lib, *g_at_fn;
+static id<MTLFunction> alpha_fs_fn(NvShader *fs, uint32_t func, float ref) {
+    if (!fs || fs->builtin || fs->stage != 1 || func < NVN_ALPHA_FUNC_NEVER || func >= NVN_ALPHA_FUNC_ALWAYS) return nil;
+    uint32_t rb; memcpy(&rb, &ref, 4);
+    NSString *fk = [NSString stringWithFormat:@"%s|%u|%08x", fs->key, func, rb], *lk = [NSString stringWithUTF8String:fs->key];
+    os_unfair_lock_lock(&g_at_lock);
+    if (!g_at_lib) { g_at_lib = [NSMutableDictionary dictionary]; g_at_fn = [NSMutableDictionary dictionary]; }
+    id c = g_at_fn[fk]; if (c) { os_unfair_lock_unlock(&g_at_lock); return c == NSNull.null ? nil : c; }
+    id lib = g_at_lib[lk];
+    if (!lib) {
+        lib = NSNull.null; NSError *e = nil;
+        NSString *src = [NSString stringWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.metal", g_msl_dir, lk] encoding:NSUTF8StringEncoding error:&e];
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"float4\\s+(\\w+)\\s*\\[\\[color\\(0\\)\\]\\]" options:0 error:nil];
+        NSTextCheckingResult *m = src ? [re firstMatchInString:src options:0 range:NSMakeRange(0, src.length)] : nil;
+        NSRange rt = src ? [src rangeOfString:@"return out;" options:NSBackwardsSearch] : NSMakeRange(NSNotFound, 0), us = src ? [src rangeOfString:@"using namespace metal;"] : NSMakeRange(NSNotFound, 0);
+        if (!m || rt.location == NSNotFound || us.location == NSNotFound) MLOG("[RED] alpha test: shader %s has no source to add it to (%s): its alpha test is not applied", fs->key, src ? "unexpected layout" : e.localizedDescription.UTF8String);
+        else {
+            NSString *o = [src substringWithRange:[m rangeAtIndex:1]];
+            NSString *t = [NSString stringWithFormat:@"{ float dm_a = out.%@.w; bool dm_p = dm_af == 1 ? false : dm_af == 2 ? dm_a < dm_ar : dm_af == 3 ? dm_a == dm_ar : dm_af == 4 ? dm_a <= dm_ar : dm_af == 5 ? dm_a > dm_ar : dm_af == 6 ? dm_a != dm_ar : dm_af == 7 ? dm_a >= dm_ar : true; if (!dm_p) discard_fragment(); }\n    ", o];
+            NSMutableString *ns = [src mutableCopy];
+            [ns insertString:t atIndex:rt.location];
+            [ns insertString:@"\nconstant int dm_af [[function_constant(100)]];\nconstant float dm_ar [[function_constant(101)]];\n" atIndex:us.location + us.length];
+            MTLCompileOptions *co = [MTLCompileOptions new]; co.preserveInvariance = YES;
+            id<MTLLibrary> l = [g_dev newLibraryWithSource:ns options:co error:&e];
+            if (l) lib = l; else MLOG("[RED] alpha test: shader %s does not compile with the test: %s", fs->key, e.localizedDescription.UTF8String);
+        } }
+    g_at_lib[lk] = lib;
+    id<MTLFunction> f = nil;
+    if (lib != NSNull.null) {
+        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; int fi = (int)func;
+        [cv setConstantValue:&fi type:MTLDataTypeInt atIndex:100]; [cv setConstantValue:&ref type:MTLDataTypeFloat atIndex:101];
+        NSError *e = nil; f = fn4_note([(id<MTLLibrary>)lib newFunctionWithName:@"main0" constantValues:cv error:&e], lib, @"main0", cv);
+        if (!f) MLOG("[RED] alpha test: shader %s specialization failed: %s", fs->key, e.localizedDescription.UTF8String);
+        else { static int n; if (n++ < 12) MLOG("alpha test: shader %s func %u ref %g", fs->key, func, ref); }
+    }
+    g_at_fn[fk] = f ? (id)f : NSNull.null; os_unfair_lock_unlock(&g_at_lock); return f;
+}
 static int pf_int_kind(MTLPixelFormat f);
 // A pipeline Metal refused: when a colour the fragment shader writes has an integer attachment, its output was most likely translated as float (a game without PC reflection has no output types,
 // Tears of the Kingdom's BC4 block encoder and Ultrahand mask were the first cases). Writes the facts row that declares the outputs, for the profile's shader_facts_manual.tsv (merged by shader_split.py)
@@ -5378,6 +5420,8 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRe
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, g_pso_lmap != NULL);
     if (g_pso_lmap) { memcpy(k.lmap, g_pso_lmap, 8); k.fsfn = (__bridge void *)g_pso_fsfn; }
     id<MTLFunction> ms_fn = ms_fs_override(fs); if (ms_fn) k.fsfn = (__bridge void *)ms_fn;   // DM_NVN_MAGSCAN phases 2 / 3
+    if (!ms_fn && !g_pso_lmap && !g_pso_amp && fs && S.color.alpha_func && S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS && g_pass.cfmt[0] && !pf_int_kind((MTLPixelFormat)g_pass.cfmt[0])) {
+        ms_fn = alpha_fs_fn(fs, S.color.alpha_func, S.alpha_ref); if (ms_fn) k.fsfn = (__bridge void *)ms_fn; }   // alpha test
     if (g_pso_amp) { if (k.fsfn || g_pso_lmap) return nil; k.fsfn = AMP_MARK; return sm_amp_get(&k, vs, fs); }   // a slice-merged pass's pipeline: built in the background, nil until then
     // DM_PSO_PULL_ALL=1 (diagnostic): every draw that has a pulling pipeline draws with it, never with the pipeline for its layout
     { static int all = -1; if (all < 0) { const char *ev = getenv("DM_PSO_PULL_ALL"); all = ev && !strcmp(ev, "1"); if (all) MLOG("DM_PSO_PULL_ALL=1: every draw with a pulling pipeline draws with it (diagnostic)"); }
@@ -6359,6 +6403,7 @@ static int state_op(uint32_t op, const void *a) {
         case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_depth_clamp *)a)->on; break;
         case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; memcpy(S.vp_sw[b->first], b->sw, 4 * (size_t)b->n); break; }
         case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, 16); break;
+        case OP_ALPHA_REF: { float r = ((const p_alpha_ref *)a)->ref; if (r != S.alpha_ref) { S.alpha_ref = r; g_pso_dirty = 1; } break; }
         case OP_COPY_STRIDE: { const p_copy_stride *cs = a; if (cs->image) S.copy_img_stride = cs->stride; else S.copy_stride = cs->stride; break; }
         case OP_TF_BIND: { const p_tf_bind *b = a; if (b->index >= 0 && b->index < 4) S.tf[b->index] = *b; break; }
         case OP_TF_STATE: { const p_tf_state *b = a;   // Begin writes from the start of each buffer; Pause / Resume keep the offsets (the host keeps them itself, the game's control buffer is not used)
@@ -6444,6 +6489,7 @@ static void pso_predict_rest_(void) {
         }
         if (hq.op == OP_DRAW || hq.op == OP_DRAW_IDX) {
             if (S.rast_discard) continue;   // rasterizes nothing: transform feedback capture or nothing (tf_draw)
+            if (S.color.alpha_func && S.color.alpha_func != NVN_ALPHA_FUNC_ALWAYS) continue;   // alpha test: a pipeline with its own fragment function (alpha_fs_fn)
             draws++;
             __unsafe_unretained NvProg *pr = S.prog ? prog_get(S.prog) : nil; if (!pr || !pr->sh[0]) continue;
             __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
@@ -6575,7 +6621,7 @@ static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *
             case OP_UPDATE_UB: if (!ubd_on()) return n; break;
             case OP_DRAW: case OP_DRAW_IDX: case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
             case OP_BIND_VBUF: case OP_BIND_UBO: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL: case OP_POLY_OFFSET:
-            case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
+            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_COPY_STRIDE: break;
             default: return n;
         }
         p += h.size;
@@ -8167,7 +8213,7 @@ static int lc_keeps(uint32_t op) {
         case OP_SET_RT: case OP_CLEAR_COLOR: case OP_CLEAR_DS: case OP_DRAW: case OP_DRAW_IDX: case OP_BEGIN: case OP_JUMP: case OP_CALL:
         case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
         case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
+        case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_COPY_STRIDE:
         case OP_TF_BIND: case OP_TF_STATE: case OP_RAST_DISCARD: case OP_PRIM_RESTART: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: case OP_RENDER_COND:
         case OP_UPDATE_UB: case OP_COPY_B2B: case OP_CLEAR_BUF: return 1;
         default: return 0;
@@ -9321,7 +9367,7 @@ void mtl_exec(const uint8_t *p) {
             // Do not mark dirty if the state did not change (the game often re-sends the same program / state block / vertex format before each draw; the dirty flag only decides whether to re-fetch the pipeline / depth-stencil object, and equal values mean the same object)
             case OP_SCISSOR: case OP_BIND_PROGRAM: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM: case OP_BIND_VBUF: case OP_BIND_VBUF1:
             case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SSBO: case OP_BIND_TEX: case OP_BIND_TEX1: case OP_BIND_SAMP: case OP_BIND_IMG: case OP_STENCIL:
-            case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_COPY_STRIDE:
+            case OP_POLY_OFFSET: case OP_VIEWPORTS: case OP_DEPTH_RANGE: case OP_DEPTH_CLAMP: case OP_VP_SWIZZLE: case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_COPY_STRIDE:
                 state_op(h.op, a); break;
             case OP_TF_BIND: { const p_tf_bind *b = a; PD("Y tf bind %d addr=%#llx size=%llu", b->index, (unsigned long long)b->addr, (unsigned long long)b->size); state_op(h.op, a); break; }
             case OP_TF_STATE: { const p_tf_state *b = a; static const char *const w[4] = {"begin", "end", "pause", "resume"}; PD("Y tf %s ctl=%#llx written %llu/%llu/%llu/%llu", w[b->what & 3], (unsigned long long)b->ctl,
