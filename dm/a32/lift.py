@@ -450,10 +450,12 @@ class Lifter(VfpMixin, NeonMixin):
             if bits(w, 27, 24) == 5 and bits(w, 15, 12) == 15: out.append('nop'); return True        # pld / pli
             return False
         if bits(w, 27, 24) == 15: out += mov32('w21', bits(w, 23, 0)); out.append('bl _a32_svc_gate'); return True
-        if w & 0x0ff00fee == 0x0c500f0e:                                      # mrrc p15, 1, Rt, Rt2, c14 (CNTVCT: the system counter, 19.2 MHz on the Switch, 24 MHz here)
+        if w & 0x0ff00fee == 0x0c500f0e:                                      # mrrc p15, 1, Rt, Rt2, c14 (CNTVCT: the system counter, 19.2 MHz on the Switch)
             rt, rt2 = bits(w, 15, 12), bits(w, 19, 16)
             if 15 in (rt, rt2) or rt == rt2: raise Unsupported('cntvct into pc')
-            out += ['mrs x16, cntvct_el0', 'lsl x16, x16, #2', 'movz x17, #5', 'udiv x16, x16, x17', 'mov w%d, w16' % rt, 'lsr x16, x16, #32', 'mov w%d, w16' % rt2]; return True
+            # the host counter's frequency is read, not assumed (24 MHz on some Macs, 1 GHz on others): ticks = q * 19.2M + (r * 19.2M) / f with q, r = divmod(counter, f), which cannot overflow
+            out += ['mrs x16, cntvct_el0', 'mrs x17, cntfrq_el0', 'udiv x15, x16, x17', 'msub x16, x15, x17, x16', 'movz x19, #0xf800', 'movk x19, #0x124, lsl #16',
+                    'mul x15, x15, x19', 'mul x16, x16, x19', 'udiv x16, x16, x17', 'add x16, x16, x15', 'mov w%d, w16' % rt, 'lsr x16, x16, #32', 'mov w%d, w16' % rt2]; return True
         if w & 0x0fff0fdf == 0x0e070f9a and bits(w, 3, 0) == 10:             # mcr p15, 0, Rt, c7, c10, {4,5}: the pre-ARMv7 barrier encodings (dsb / dmb)
             out.append('dsb ish' if bits(w, 5, 5) == 0 else 'dmb ish'); return True
         if w & 0x0fff0fff == 0x0e070f95:                                      # mcr p15, 0, Rt, c7, c5, 4 (isb)

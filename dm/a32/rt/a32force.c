@@ -6,6 +6,7 @@
 #include "a32force.h"
 #include "a32gfx.h"
 #include <time.h>
+#include <unistd.h>
 extern const char *a32_hook_current_name(void);
 static void f_noop(Frame *f) { f->r[0] = 0; }
 // ---- nn::time: the host answers in UTC from the Mac's clock ----
@@ -43,19 +44,21 @@ static void f_abort(Frame *f) {
 // the SDK's npad calls are taken over by name instead of emulating the hid shared memory. Player 1 is a full-key controller on No1; A32_KEYS="seconds:key[+key],..." presses keys for a moment (A B X Y L R ZL ZR Plus Minus Left Up Right Down)
 extern uint64_t a32_pad_buttons; extern int32_t a32_pad_axes[4];
 typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attributes, pad; } NpadState;
+static int32_t scripted_ax[2];                                              // A32_KEYS stick entries SU SD SL SR: the left stick pushed up, down, left, right
 static uint64_t scripted_keys(void) {
     static const char *spec; static int init; static uint64_t t0;
     if (!init) { init = 1; spec = getenv("A32_KEYS"); struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); t0 = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000; }
     if (!spec) return 0;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ((uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000 - t0) / 1000.0;
     static const char *names[] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
-    uint64_t b = 0; const char *p = spec;
+    uint64_t b = 0; const char *p = spec; scripted_ax[0] = scripted_ax[1] = 0;
     while (*p) {
         double at = atof(p); const char *c = strchr(p, ':'); if (!c) break; c++;
         const char *e = c + strcspn(c, ",");
         if (now >= at && now < at + 0.25) for (const char *k = c; k < e; ) {
             const char *pl = k + strcspn(k, "+,"); size_t n = (size_t)(pl - k);
             for (int i = 0; i < 16; i++) if (strlen(names[i]) == n && !strncmp(k, names[i], n)) b |= 1ull << i;
+            if (n == 2 && k[0] == 'S') { if (k[1] == 'U') scripted_ax[1] = 30000; if (k[1] == 'D') scripted_ax[1] = -30000; if (k[1] == 'L') scripted_ax[0] = -30000; if (k[1] == 'R') scripted_ax[0] = 30000; }
             k = *pl == '+' ? pl + 1 : pl;
         }
         p = *e ? e + 1 : e;
@@ -69,11 +72,37 @@ static void kb_watch(void) {
     static uint32_t last[6]; uint32_t m = a32_kb_mgr, v[6] = { rd32(m + 0x2ec8), rd32(m + 0x10), rd32(m + 0x36ac), g_mem[m + 0x2ecc], g_mem[m + 0x2ecd], g_mem[m + 0x2ece] };
     if (memcmp(v, last, sizeof v)) { memcpy(last, v, sizeof v); LOG("swkbd-watch: state %u [0x10] %u text-state %u flags %u %u %u", v[0], v[1], v[2], v[3], v[4], v[5]); }
 }
+extern uint32_t a32_callbackv(uint32_t pc, int n, const uint32_t *args); extern uint32_t a32_find_symbol(const char *name);
+// A32_SELFTEST=1: the SDK's tick conversion (64-bit division through __aeabi_uldivmod) against the host's own arithmetic
+static void selftest_ticks(void) {
+    static int done; if (done || !getenv("A32_SELFTEST")) return; done = 1;
+    uint32_t fn = a32_find_symbol("_ZNK2nn2os6detail11TickManager17ConvertToTimeSpanENS0_4TickE"); uint32_t buf = a32_guest_alloc(64, 8);
+    uint64_t ticks[] = { 0, 1, 19200000, 19200001, 0xffffffffull, 0x100000000ull, 123456789012ull, 20000000000000ull };
+    { uint32_t gt = a32_find_symbol("_ZN2nn2os13GetSystemTickEv"); uint64_t t0, t1;
+      uint32_t a[1] = { buf }; a32_callbackv(gt, 1, a); t0 = rd32(buf) | (uint64_t)rd32(buf + 4) << 32; usleep(100000);
+      a32_callbackv(gt, 1, a); t1 = rd32(buf) | (uint64_t)rd32(buf + 4) << 32;
+      LOG("selftest: GetSystemTick advanced %llu ticks in 100 ms (want about 1920000)", (unsigned long long)(t1 - t0)); }
+    for (unsigned i = 0; i < sizeof ticks / sizeof *ticks; i++) {
+        uint64_t t = ticks[i]; uint32_t a[4] = { buf, buf + 16, (uint32_t)t, (uint32_t)(t >> 32) }; a32_callbackv(fn, 4, a);
+        uint64_t got = rd32(buf) | (uint64_t)rd32(buf + 4) << 32, want = (t / 19200000) * 1000000000ull + (t % 19200000) * 1000000000ull / 19200000;
+        LOG("selftest: ticks %llu -> %llu ns (want %llu) %s", (unsigned long long)t, (unsigned long long)got, (unsigned long long)want, got == want ? "ok" : "WRONG");
+    }
+}
+static void hid_rate(void) {
+    selftest_ticks();                                        // A32_HID_RATE=1: how often the game polls its pad (its logic rate), once per 3 s
+    static int on = -1; static unsigned n; static struct timespec t0;
+    if (on < 0) on = getenv("A32_HID_RATE") != NULL;
+    if (!on) return;
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); if (!t0.tv_sec) t0 = t; n++;
+    double dt = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9;
+    if (dt >= 3) { LOG("hid: %.1f pad polls per second", n / dt); n = 0; t0 = t; }
+}
 static void hid_fill(NpadState *s, uint32_t id) {
-    kb_watch();
+    kb_watch(); hid_rate();
     static int64_t sampling = 1 << 16; memset(s, 0, sizeof *s); s->sampling = ++sampling;
     if (id != 0 && id != 0x20) return;                                          // No1 and the handheld npad report the controller
     uint64_t b = (a32_pad_buttons | scripted_keys()) & 0xffffull; int32_t a[4]; memcpy(a, a32_pad_axes, sizeof a);
+    if (scripted_ax[0]) a[0] = scripted_ax[0]; if (scripted_ax[1]) a[1] = scripted_ax[1];
     s->lx = a[0]; s->ly = a[1]; s->rx = a[2]; s->ry = a[3];
     if (s->lx < -0x4000) b |= 1u << 16; if (s->ly > 0x4000) b |= 1u << 17; if (s->lx > 0x4000) b |= 1u << 18; if (s->ly < -0x4000) b |= 1u << 19;
     if (s->rx < -0x4000) b |= 1u << 20; if (s->ry > 0x4000) b |= 1u << 21; if (s->rx > 0x4000) b |= 1u << 22; if (s->ry < -0x4000) b |= 1u << 23;
