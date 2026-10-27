@@ -6,6 +6,16 @@
 #include "a32svcs.h"
 #include <time.h>
 #include <pthread.h>
+
+// "not implemented" notes are printed once per distinct message: a service the game polls every frame would otherwise flood the log
+static int ni_seen(const char *msg) {
+    static char tab[512][200]; static int n; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; int hit = 0;
+    pthread_mutex_lock(&mu);
+    for (int i = 0; i < n; i++) if (!strcmp(tab[i], msg)) { hit = 1; break; }
+    if (!hit && n < 512) snprintf(tab[n++], 200, "%s", msg);
+    pthread_mutex_unlock(&mu); return hit;
+}
+#define LOGNI(...) do { char _b[200]; snprintf(_b, sizeof _b, __VA_ARGS__); if (!ni_seen(_b)) LOG("%s", _b); } while (0)
 typedef struct { const char *name; Obj *(*make)(void); } ServiceDef;
 
 typedef struct { uint32_t cmd; const char *obj; } ObjCmd;
@@ -26,7 +36,7 @@ static int csg_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc 
     case 5: c->out[c->out_sz++] = 1; ipc_pad(c, 3); return 0;                                                                                      // GetOperationMode: docked
     case 6: c->out[c->out_sz++] = 0; ipc_pad(c, 3); return 0;                                                                                      // GetPerformanceMode: normal
     case 9: c->out[c->out_sz++] = 1; ipc_pad(c, 3); return 0;                                                                                      // GetCurrentFocusState: in focus
-    default: LOG("ipc: ICommonStateGetter command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
+    default: LOGNI("ipc: ICommonStateGetter command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
     }
 }
 // ---- IStorage (applet storage): a byte array the game opens and reads (launch parameters) ----
@@ -40,12 +50,12 @@ static int astorage_accessor_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32
         if (ob.addr) { uint32_t n = ob.size; memset(g_mem + ob.addr, 0, n); if (off < st->size) memcpy(g_mem + ob.addr, st->data + off, off + n > st->size ? st->size - (uint32_t)off : n); }
         return 0;
     }
-    LOG("ipc: IStorageAccessor command %u not implemented: success, zeroed output", cmd); return 0;
+    LOGNI("ipc: IStorageAccessor command %u not implemented: success, zeroed output", cmd); return 0;
 }
 static int astorage_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
     (void)in; (void)in_sz;
     if (cmd == 0) { ipc_out_obj(c, obj_new("IStorageAccessor", astorage_accessor_cmd, o->data)); return 0; }   // Open
-    LOG("ipc: IStorage (applet) command %u not implemented: success, zeroed output", cmd); return 0;
+    LOGNI("ipc: IStorage (applet) command %u not implemented: success, zeroed output", cmd); return 0;
 }
 static Obj *make_astorage(const void *bytes, uint32_t size) { AStorage *st = calloc(1, sizeof *st); st->data = calloc(1, size); memcpy(st->data, bytes, size); st->size = size; return obj_new("IStorage", astorage_cmd, st); }
 static int appfn_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
@@ -79,7 +89,7 @@ int spec_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
             return (int)x->result;
         }
     }
-    LOG("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz);
+    LOGNI("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz);
     return 0;
 }
 #define NOOBJ {0, 0}
@@ -120,15 +130,15 @@ static uint32_t g_hid_shm; static uint8_t *g_hid_mem;
 static int hid_res_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
     (void)o; (void)in;
     if (cmd == 0) { if (!g_hid_shm) g_hid_shm = a32_new_shmem_handle(0x40000, &g_hid_mem); c->copy[c->ncopy++] = g_hid_shm; return 0; }       // GetSharedMemoryHandle
-    LOG("ipc: IAppletResource command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
+    LOGNI("ipc: IAppletResource command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
 }
-static int hid_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOG("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
+static int hid_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOGNI("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
 static int hid_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
     switch (cmd) {
     case 0: ipc_out_obj(c, obj_new("IAppletResource", hid_res_cmd, NULL)); return 0;                                                    // CreateAppletResource
     case 203: ipc_out_obj(c, obj_new("IActiveVibrationDeviceList", hid_generic, NULL)); return 0;                                       // CreateActiveVibrationDeviceList
     case 106: case 124: case 131: case 142: case 211: c->copy[c->ncopy++] = a32_event_handle(o, (int)cmd); return 0;                  // Acquire...EventHandle
-    default: LOG("ipc: IHidServer command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
+    default: LOGNI("ipc: IHidServer command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
     }
 }
 static Obj *mk_hid(void) { return obj_new("IHidServer", hid_cmd, NULL); }
@@ -141,9 +151,9 @@ static int acc_profile_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_
         if (cmd == 0 && c->nb && c->b[0].addr) memset(g_mem + c->b[0].addr, 0, c->b[0].size);
         return 0;
     }
-    LOG("ipc: IProfile command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
+    LOGNI("ipc: IProfile command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
 }
-static int acc_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOG("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
+static int acc_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOGNI("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
 static int acc_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
     (void)o;
     switch (cmd) {
@@ -153,7 +163,7 @@ static int acc_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc 
     case 4: memcpy(c->out + c->out_sz, k_uid, 16); c->out_sz += 16; return 0;                           // GetLastOpenedUser
     case 5: ipc_out_obj(c, obj_new("IProfile", acc_profile_cmd, NULL)); return 0;                       // GetProfile
     case 101: ipc_out_obj(c, obj_new("IManagerForApplication", acc_generic, NULL)); return 0;           // GetBaasAccountManagerForApplication
-    default: LOG("ipc: IAccountServiceForApplication command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
+    default: LOGNI("ipc: IAccountServiceForApplication command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
     }
 }
 static Obj *mk_acc(void) { return obj_new("IAccountServiceForApplication", acc_cmd, NULL); }
@@ -184,10 +194,10 @@ static int ar_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *
     case 7: c->copy[c->ncopy++] = st->ev; return 0;                                               // QuerySystemEvent
     case 8: return 0;                                                                             // SetRenderingTimeLimit
     case 9: ipc_put32(c, 100); return 0;                                                          // GetRenderingTimeLimit
-    default: LOG("ipc: IAudioRenderer command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
+    default: LOGNI("ipc: IAudioRenderer command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
     }
 }
-static int ar_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOG("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
+static int ar_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOGNI("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
 static int audren_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
     (void)o;
     switch (cmd) {
@@ -198,12 +208,12 @@ static int audren_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, I
     }
     case 1: ipc_put64(c, 0x600000); return 0;                                                     // GetWorkBufferSize
     case 2: case 4: ipc_out_obj(c, obj_new("IAudioDevice", ar_generic, NULL)); return 0;           // GetAudioDeviceService
-    default: LOG("ipc: IAudioRendererManager command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
+    default: LOGNI("ipc: IAudioRendererManager command %u (%u bytes in) not implemented: success, zeroed output", cmd, in_sz); return 0;
     }
 }
 static Obj *mk_audren(void) { return obj_new("IAudioRendererManager", audren_cmd, NULL); }
 // ---- friend:u: no friends ----
-static int friend_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOG("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
+static int friend_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOGNI("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
 static int friend_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
     if (cmd == 0) { ipc_out_obj(c, obj_new("IFriendService", friend_generic, NULL)); return 0; }                // CreateFriendService
     if (cmd == 1) { ipc_out_obj(c, obj_new("INotificationService", friend_generic, NULL)); return 0; }          // CreateNotificationService
@@ -211,7 +221,7 @@ static int friend_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, I
 }
 static Obj *mk_friend(void) { return obj_new("friend:u", friend_cmd, NULL); }
 // ---- apm and set ----
-static int misc_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOG("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
+static int misc_generic(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) { (void)in; (void)c; LOGNI("ipc: %s command %u (%u bytes in) not implemented: success, zeroed output", o->iface, cmd, in_sz); return 0; }
 static int apm_cmd(Obj *o, uint32_t cmd, const uint8_t *in, uint32_t in_sz, Ipc *c) {
     if (cmd == 0) { ipc_out_obj(c, obj_new("ISession", misc_generic, NULL)); return 0; }               // OpenSession
     if (cmd == 1) { ipc_put32(c, 0); return 0; }                                                        // GetPerformanceMode: handheld
