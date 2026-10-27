@@ -117,23 +117,34 @@ static void f_kb_appear(Frame *f) { LOG("swkbd: Appear"); kb_state = 2; kb_wait 
 static void f_kb_disappear(Frame *f) { LOG("swkbd: Disappear"); kb_state = 4; kb_wait = 10; f->r[0] = 0; }
 static void f_kb_finalize(Frame *f) { LOG("swkbd: Finalize"); kb_dump("in Finalize"); kb_state = 0; f->r[0] = 0; }
 // the Utf8 callback arguments: a text buffer (2001 bytes) followed by words from +0x7d4 (the length first; ChangedStringArgUtf8 has three more)
-static uint32_t kb_arg(void) {
+static uint32_t kb_arg(const char *name) {
     static uint32_t a; if (!a) a = a32_guest_alloc(0x800, 16);
-    const char *name = getenv("A32_NAME"); if (!name || !*name) name = "Hunter";
     memset(g_mem + a, 0, 0x800); strncpy((char *)g_mem + a, name, 0x7d0);
-    wr32(a + 0x7d4, (uint32_t)strlen((char *)g_mem + a)); wr32(a + 0x7d8, (uint32_t)strlen((char *)g_mem + a)); return a;
+    wr32(a + 0x7d4, (uint32_t)strlen(name)); wr32(a + 0x7d8, (uint32_t)strlen(name)); return a;
+}
+extern int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap);
+// the player's text: A32_NAME when set (scripted runs), otherwise the front end's input box; no window: "Hunter"
+static int kb_ask(char *out, int cap) {
+    const char *n = getenv("A32_NAME"); if (n && *n) { snprintf(out, (size_t)cap, "%s", n); return 1; }
+    int r = front_text_input("Hunter name", "Choose a name for your hunter.", "Names must be 10 characters or less.", "", 10, out, cap);
+    if (r < 0) { snprintf(out, (size_t)cap, "Hunter"); return 1; }
+    return r;
 }
 static void f_kb_calc(Frame *f) {
     f->r[0] = 0;
     if (!kb_state || --kb_wait > 0) return;
     int st = kb_state; kb_state = 0;
     if (st == 1) { if (kb_cb[0]) { LOG("swkbd: finished initialize"); a32_callback(kb_cb[0], 0, 0, 0, 0); } }
-    else if (st == 2) {                                                 // shown: the player types the name and confirms it
-        uint32_t a = kb_arg(); LOG("swkbd: name \"%s\"", (char *)g_mem + a);
-        if (kb_cb[5]) a32_callback(kb_cb[5], a, 0, 0, 0);
-        if (kb_cb[6]) a32_callback(kb_cb[6], a, 0, 0, 0);
-        kb_dump("after enter");
-        kb_state = 4; kb_wait = getenv("A32_KB_FINISH") ? atoi(getenv("A32_KB_FINISH")) : 20;                                    // confirming hides the keyboard by itself
+    else if (st == 2) {                                                 // shown: the player types the name and confirms (or cancels) it
+        char text[256]; int ok = kb_ask(text, sizeof text);
+        if (ok) {
+            size_t n = 0; for (int chars = 0; text[n] && chars < 10; chars++) { n++; while ((text[n] & 0xc0) == 0x80) n++; } text[n] = 0;      // at most 10 characters
+            uint32_t a = kb_arg(text); LOG("swkbd: name \"%s\"", text);
+            if (kb_cb[5]) a32_callback(kb_cb[5], a, 0, 0, 0);
+            if (kb_cb[6]) a32_callback(kb_cb[6], a, 0, 0, 0);
+            kb_dump("after enter");
+        } else { LOG("swkbd: cancelled"); if (kb_cb[3]) a32_callback(kb_cb[3], 0, 0, 0, 0); }
+        kb_state = 4; kb_wait = getenv("A32_KB_FINISH") ? atoi(getenv("A32_KB_FINISH")) : 20;                                    // confirming or cancelling hides the keyboard by itself
     } else if (st == 4) { kb_dump("before finished"); if (kb_cb[4]) { LOG("swkbd: finished keyboard"); a32_callback(kb_cb[4], 0, 0, 0, 0); } kb_dump("after finished"); }
 }
 
