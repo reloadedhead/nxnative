@@ -54,7 +54,7 @@ typedef struct {
     uint8_t *vhdr[2]; int vhdr_n[2]; int ch, rate, red_dec, red_img, red_vb;
     AudioConverterRef aac; const uint8_t *aac_pkt; UInt32 aac_pkt_n; AudioStreamPacketDescription aac_desc;
     uint64_t dec_n, dec_ns, dec_max;
-    unsigned long ncall[24];
+    unsigned long ncall[24]; uint64_t rate_t0; unsigned long rate_prev[24];
 } mdec_t;
 
 // ---- the SDK's functions (guest code) ----
@@ -140,7 +140,17 @@ static void md_defer_body(void *arg) {
         else { uint64_t w = next - now; struct timespec ts = { (time_t)(w / 1000000000u), (long)(w % 1000000000u) }; pthread_cond_timedwait_relative_np(&g_dfcv, &g_dfmu, &ts); }
     }
 }
-#define MD_TRACE(d, slot, fmt, ...) do { unsigned long n_ = ++(d)->ncall[slot]; if (md_trace_all() || n_ <= 12 || !(n_ & (n_ - 1))) LOG("[movie] " fmt, ##__VA_ARGS__); } while (0)
+// A32_MOVIE_RATE=1: calls per second of the send / acquire / get / release methods of each decoder, every 2 s
+static void md_rate(mdec_t *d) {
+    static int on = -1; if (on < 0) on = getenv("A32_MOVIE_RATE") != NULL;
+    if (!on) return;
+    uint64_t t = now_ns(); if (!d->rate_t0) d->rate_t0 = t;
+    if (t - d->rate_t0 < 2000000000ull) return;
+    double dt = (double)(t - d->rate_t0) / 1e9; unsigned long *c = d->ncall, *p = d->rate_prev;
+    LOG("[movie-rate] decoder %p (%dx%d): send %.1f acquire %.1f get %.1f release %.1f per second", (void *)d, d->w, d->h, (double)(c[7] - p[7]) / dt, (double)(c[8] - p[8]) / dt, (double)(c[12] - p[12]) / dt, (double)(c[13] - p[13]) / dt);
+    memcpy(p, c, sizeof d->ncall); d->rate_t0 = t;
+}
+#define MD_TRACE(d, slot, fmt, ...) do { md_rate(d); unsigned long n_ = ++(d)->ncall[slot]; if (md_trace_all() || n_ <= 12 || !(n_ & (n_ - 1))) LOG("[movie] " fmt, ##__VA_ARGS__); } while (0)
 
 static void md_dims(const mdec_t *d, int *w, int *h, int *stride, int *slice) { *w = d->w > 0 ? d->w : 1920; *h = d->h > 0 ? d->h : 1080; *stride = *w; *slice = *h; }
 

@@ -142,7 +142,7 @@ static void kb_dump(const char *w) {
 static void f_kb_init(Frame *f) { kb_mgr = f->r[0] - 0x14; LOG("swkbd: Initialize"); kb_state = 1; kb_wait = 3; f->r[0] = 1; }
 static void f_kb_imgreq(Frame *f) { wr32(f->r[1], 0x400000); wr32(f->r[2], 0x1000); f->r[0] = 0; }          // image memory (the keyboard is not drawn: the game gets a blank image)
 static void f_kb_launch(Frame *f) { LOG("swkbd: Launch"); kb_state = 1; kb_wait = 2; f->r[0] = 0; }
-static void f_kb_appear(Frame *f) { LOG("swkbd: Appear"); kb_state = 2; kb_wait = 30; f->r[0] = 0; }
+static void f_kb_appear(Frame *f) { LOG("swkbd: Appear"); kb_state = 2; kb_wait = getenv("A32_KB_DELAY") ? atoi(getenv("A32_KB_DELAY")) : 30; f->r[0] = 0; }
 static void f_kb_disappear(Frame *f) { LOG("swkbd: Disappear"); kb_state = 4; kb_wait = 10; f->r[0] = 0; }
 static void f_kb_finalize(Frame *f) { LOG("swkbd: Finalize"); kb_dump("in Finalize"); kb_state = 0; f->r[0] = 0; }
 // the Utf8 callback arguments: a text buffer (2001 bytes) followed by words from +0x7d4 (the length first; ChangedStringArgUtf8 has three more)
