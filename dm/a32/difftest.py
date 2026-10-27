@@ -59,6 +59,7 @@ CLASSES = {
     'nshift': (0xfe800010, 0xf2800010),
     'n3diff': (0xfe800010, 0xf2800000),
     'ssat':   (0x0fa00030, 0x06a00010),
+    'nvext':  (0xffb00810, 0xf2b00000),
     'nvsel':  (0xff800e50, 0xfe000a00),
     'vdp':    (0x0f000e10, 0x0e000a00),
     'vxfer':  (0x0f000e10, 0x0e000a10),

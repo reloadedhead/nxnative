@@ -81,6 +81,8 @@ def gen(name, ret, args):
             L.append('    void *%s_t[16]; { uint32_t g = ac32(&c); const uint32_t *s = g ? (const uint32_t *)(g_mem + g) : NULL; unsigned n = %s > 16 ? 16 : %s;' % (v, last_int, last_int))
             L.append('      for (unsigned k = 0; k < n; k++) %s_t[k] = s ? gp(s[k]) : NULL; } void *%s = %s_t;' % (v, v, v))
         else: raise SystemExit('%s: argument kind %s' % (name, k))
+    if name == 'nvnWindowSetPresentInterval':                                                    # the game is a 30 fps title that asks for 1: its logic steps once per presented frame, so 1 runs it at twice the speed
+        L.append('    { static int ov = -1; if (ov < 0) { const char *e = getenv("A32_PRESENT_INTERVAL"); ov = e ? atoi(e) : 2; } if (ov > 0) a1 = (uint32_t)ov; }')
     call = 'impl_%s(%s)' % (name, ', '.join(('(%s)a%d' % (args[i], i)) if kinds[i] in ('u32',) else
                                          ('(%s)a%d' % (args[i], i) if kinds[i] in ('ptr', 'ptrarray', 'ptrdiff_out') else
                                           ('(NVN%s){a%d}' % ('separateTextureHandle' if 'Texture' in args[i] else 'separateSamplerHandle', i) if kinds[i] == 'struct64' else

@@ -125,8 +125,17 @@ class NeonMixin:
         return True
 
     # ---- data processing ----------------------------------------------------------------------------------------------------------
+    def neon_vext(self, w, Q, out):                                   # vext.8: bytes imm4.. of the concatenation Vn:Vm (any element size spelled as a byte offset)
+        d, n, m = self.neon_regs(w, Q); imm = bits(w, 11, 8)
+        if Q:
+            out.append('ext v%d.16b, v%d.16b, v%d.16b, #%d' % (d >> 1, n >> 1, m >> 1, imm)); return True
+        if imm > 7: raise Unsupported('vext.8 d with an offset above 7')
+        a, b = self.dsrc(n, 17, out), self.dsrc(m, 18, out)
+        out.append('ext v16.8b, %s.8b, %s.8b, #%d' % (a, b, imm)); out.append('mov v%d.d[%d], v16.d[0]' % (d >> 1, d & 1)); return True
+
     def neon_dp(self, w, addr, out):
         U, Q = bits(w, 24, 24), bits(w, 6, 6)
+        if not U and bits(w, 23, 23) and bits(w, 21, 20) == 3 and not bits(w, 4, 4): return self.neon_vext(w, Q, out)
         if not bits(w, 23, 23): return self.neon_3same(w, U, Q, out)
         if bits(w, 21, 19) == 0 and bits(w, 7, 7) == 0 and bits(w, 4, 4): return self.neon_imm(w, U, Q, out)
         if bits(w, 4, 4): return self.neon_shift(w, U, Q, out)
