@@ -180,6 +180,7 @@ static void query_memory(uint32_t out, uint32_t addr) {
 
 // ---- GetInfo ----------------------------------------------------------------------------------------------------------------------
 static int g_nthreads_alive(void) { int n = 0; for (GThread *t = g_threads; t; t = t->next) if (!t->exited) n++; return n; }
+static uint64_t total_memory(void) { static uint64_t v; if (!v) v = getenv("A32_TOTALMEM") ? strtoull(getenv("A32_TOTALMEM"), NULL, 0) : TOTAL_MEMORY; return v; }      // A32_TOTALMEM=<bytes> (debugging: what the game believes it has)
 static uint64_t get_info(uint32_t type, uint32_t handle, uint64_t sub, uint32_t *res) {
     *res = KR_OK; (void)handle;
     switch (type) {
@@ -187,7 +188,7 @@ static uint64_t get_info(uint32_t type, uint32_t handle, uint64_t sub, uint32_t 
     case 1: return 0xffffffffffffffffull;          // PriorityMask
     case 2: return ALIAS_BASE;  case 3: return ALIAS_SIZE;
     case 4: return HEAP_BASE;   case 5: return HEAP_REGION_SIZE;
-    case 6: return TOTAL_MEMORY; case 7: return g_heap_size + 0x2000000;
+    case 6: return total_memory(); case 7: return g_heap_size + 0x2000000;
     case 8: return 0;                              // DebuggerAttached
     case 9: return 0;                              // ResourceLimit
     case 10: return 0;                             // IdleTickCount
@@ -197,7 +198,7 @@ static uint64_t get_info(uint32_t type, uint32_t handle, uint64_t sub, uint32_t 
     case 16: return 0; case 17: return 0;          // system resource size total / used
     case 18: return 0x0100770008DD8000ull;         // ProgramId
     case 20: return 0;                             // UserExceptionContextAddress
-    case 21: return TOTAL_MEMORY; case 22: return g_heap_size + 0x2000000;
+    case 21: return total_memory(); case 22: return g_heap_size + 0x2000000;
     case 23: return 1;                             // IsApplication
     case 24: return 96 - g_nthreads_alive();       // FreeThreadCount
     case 25: return 0;                             // ThreadTickCount

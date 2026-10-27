@@ -370,11 +370,28 @@ static void *pokef_thread(void *arg) {
     float f = (float)atof(v); for (char *x = strtok(a, ","); x; x = strtok(NULL, ",")) { memcpy(g_mem + (uint32_t)strtoul(x, NULL, 0), &f, 4); fprintf(stderr, "[a32] poked %s = %f\n", x, f); }
     return NULL;
 }
+
+// A32_CALLDUMP="s1,s2,...": the call counters of the module translated with --count-calls (main) are written to $A32_DUMP_DIR/calls_<n>.tsv (guest address, count) at those seconds on the key clock
+uint32_t *a32_callcnt;                                                       // table of main's text, indexed by (guest address >> 2) after bias
+static uint32_t *g_cc_tab; static uint32_t g_cc_base, g_cc_words;
+static void *calldump_thread(void *arg) {
+    (void)arg; const char *dir = getenv("A32_DUMP_DIR") ? getenv("A32_DUMP_DIR") : "/tmp"; char spec[256]; snprintf(spec, sizeof spec, "%s", getenv("A32_CALLDUMP"));
+    extern uint64_t a32_keys_t0_ms; while (!a32_keys_t0_ms) usleep(50000);
+    struct timespec t0 = { (time_t)(a32_keys_t0_ms / 1000), (long)(a32_keys_t0_ms % 1000) * 1000000 }; int n = 0;
+    for (char *tok = strtok(spec, ","); tok; tok = strtok(NULL, ","), n++) {
+        double at = atof(tok);
+        for (;;) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double e = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9; if (e >= at) break; usleep(20000); }
+        char path[512]; snprintf(path, sizeof path, "%s/calls_%d.tsv", dir, n); FILE *f = fopen(path, "w");
+        if (f) { for (uint32_t i = 0; i < g_cc_words; i++) if (g_cc_tab[i]) fprintf(f, "%x\t%u\n", g_cc_base + 4 * i, g_cc_tab[i]); fclose(f); fprintf(stderr, "[a32] call counters written to %s\n", path); }
+    }
+    return NULL;
+}
 static void on_usr1(int sig) { (void)sig; g_trace = g_trace ? 0 : 3; }
 static void on_usr2(int sig) { (void)sig; ring_dump(); }
 static void guest_main(void) {
     int argc = g_argc; char **argv = g_argv;
     g_build_dir = argv[1];
+    if (getenv("A32_CALLDUMP")) { pthread_t th; pthread_create(&th, NULL, calldump_thread, NULL); pthread_detach(th); }
     if (getenv("A32_POKEF")) { pthread_t th; pthread_create(&th, NULL, pokef_thread, NULL); pthread_detach(th); }
     if (getenv("A32_WATCHF")) { pthread_t th; pthread_create(&th, NULL, watchf_thread, NULL); pthread_detach(th); }
     if (getenv("A32_DUMP")) { pthread_t th; pthread_create(&th, NULL, dump_thread, NULL); pthread_detach(th); }
@@ -392,6 +409,9 @@ static void guest_main(void) {
     if (mprotect(g_mem, 0xf0000000u, PROT_READ | PROT_WRITE)) die("mprotect the guest address space");      // all of it, lazily committed: the 16 KB host pages are coarser than the guest's 4 KB ones
     load_modules(argv[1]);
     LOG("%d modules loaded", g_nmod);
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {                      // the counters exist for every build (the gate only runs in a --count-calls translation)
+        g_cc_base = g_mod[i].base; g_cc_words = g_mod[i].text / 4; g_cc_tab = calloc(g_cc_words, 4); a32_callcnt = (uint32_t *)((uintptr_t)g_cc_tab - ((uintptr_t)g_cc_base >> 2) * 4);
+    }
     if (getenv("A32_WWATCH")) { g_ww_addr = (uint64_t)(uintptr_t)g_mem + strtoul(getenv("A32_WWATCH"), NULL, 0); g_ww_page = g_ww_addr & ~0x3fffull; g_ww_on = 1; mprotect((void *)(uintptr_t)g_ww_page, 0x4000, PROT_READ); pthread_t th; pthread_create(&th, NULL, ww_thread, NULL); pthread_detach(th); }
     { extern const void *const *const a32_chunk_tab[]; extern const unsigned a32_chunk_n[], a32_chunk_size;      // the translated slots must be exactly where the dispatcher computes them
       for (int i = 0; i < g_nmod; i++) for (unsigned k = 1; k < a32_chunk_n[i]; k++)

@@ -36,6 +36,7 @@ def layout(exefs, mods):
 _img = {}
 OUTLINE_ALL = [False]
 OUTLINE_MODS = []
+COUNT_MODS = []   # modules whose bl / blx instructions count themselves (a32_callcnt, see a32host.c): a cheap profile of which call sites run
 OUTLINE_RANGES = []   # (module, lo, hi) text offsets whose instructions are always outlined (debugging)
 ONLY = []
 TRACE = []   # (module, lo, hi): text offsets whose instructions call the trace gate first
@@ -67,9 +68,11 @@ def translate(mod, outdir, stats, firsts):
                 lines = mov32('w21', addr) + ['b _a32_unsup']; kind = 'trap'; stats['trap:' + str(e).split('0x')[0][:36]] += 1
             traced = any(m == name and lo <= idx * 4 < hi for m, lo, hi in TRACE)
             if traced: lines = mov32('w21', addr) + ['bl _a32_trace_gate'] + lines
+            counted = name in COUNT_MODS and (((w >> 24) & 15) == 11 and (w >> 28) != 15 or (w & 0x0ffffff0) == 0x012fff30)
+            if counted: lines = mov32('w21', addr) + ['bl _a32_count_gate'] + lines
             n = sum(1 for l in lines if is_insn(l))
             stats[kind] += 1
-            if n <= SLOT_INSNS and not traced and not OUTLINE_ALL[0] and name not in OUTLINE_MODS and not any(m == name and lo <= idx * 4 < hi for m, lo, hi in OUTLINE_RANGES):
+            if n <= SLOT_INSNS and not traced and not counted and not OUTLINE_ALL[0] and name not in OUTLINE_MODS and not any(m == name and lo <= idx * 4 < hi for m, lo, hi in OUTLINE_RANGES):
                 slots += lines + ['nop'] * (SLOT_INSNS - n)
             else:
                 stats['outline'] += 1
@@ -99,6 +102,7 @@ def main():
     while '--outline-mod' in args: i = args.index('--outline-mod'); OUTLINE_MODS.append(args[i + 1]); del args[i:i + 2]
     while '--outline-range' in args:
         i = args.index('--outline-range'); m, lo, hi = args[i + 1].split(':'); OUTLINE_RANGES.append((m, int(lo, 0), int(hi, 0))); del args[i:i + 2]
+    while '--count-calls' in args: i = args.index('--count-calls'); COUNT_MODS.append(args[i + 1]); del args[i:i + 2]
     while '--only' in args: i = args.index('--only'); ONLY.append(args[i + 1]); del args[i:i + 2]
     if '--outline-all' in args: args.remove('--outline-all'); OUTLINE_ALL[0] = True
     while '--trace' in args:                                              # --trace main:0x1000:0x2000 (text offsets): every instruction in the range reports itself
@@ -124,7 +128,7 @@ def main():
         f.write('  { 0, 0, 0 } };\n')
     t0 = time.time(); stats = collections.Counter(); allfiles = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as ex:
-        futs = {ex.submit(translate_job, m, outdir, first, list(TRACE), OUTLINE_ALL[0], list(OUTLINE_MODS), list(OUTLINE_RANGES)): m for m in lay if not ONLY or m['name'] in ONLY for first in range(0, m['text'] // 4, CHUNK)}
+        futs = {ex.submit(translate_job, m, outdir, first, list(TRACE), OUTLINE_ALL[0], list(OUTLINE_MODS), list(OUTLINE_RANGES), list(COUNT_MODS)): m for m in lay if not ONLY or m['name'] in ONLY for first in range(0, m['text'] // 4, CHUNK)}
         done = 0
         for fu in concurrent.futures.as_completed(futs):
             fl, st = fu.result(); allfiles += fl; stats.update(st); done += 1
@@ -147,8 +151,8 @@ def main():
     open(os.path.join(outdir, 'objs.txt'), 'w').write('\n'.join(sorted(glob.glob(os.path.join(outdir, 'obj', '*.o')))) + '\n')
     return 0
 
-def translate_job(m, outdir, first, trace=(), outline_all=False, outline_mods=(), outline_ranges=()):
-    TRACE[:] = list(trace); OUTLINE_ALL[0] = outline_all; OUTLINE_MODS[:] = list(outline_mods); OUTLINE_RANGES[:] = list(outline_ranges)
+def translate_job(m, outdir, first, trace=(), outline_all=False, outline_mods=(), outline_ranges=(), count_mods=()):
+    TRACE[:] = list(trace); OUTLINE_ALL[0] = outline_all; OUTLINE_MODS[:] = list(outline_mods); OUTLINE_RANGES[:] = list(outline_ranges); COUNT_MODS[:] = list(count_mods)
     st = collections.Counter()
     return translate(m, outdir, st, [first]), st
 

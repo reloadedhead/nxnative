@@ -85,6 +85,19 @@ static void selftest_ticks(void) {
       uint32_t a[1] = { buf }; a32_callbackv(gt, 1, a); t0 = rd32(buf) | (uint64_t)rd32(buf + 4) << 32; usleep(100000);
       a32_callbackv(gt, 1, a); t1 = rd32(buf) | (uint64_t)rd32(buf + 4) << 32;
       LOG("selftest: GetSystemTick advanced %llu ticks in 100 ms (want about 1920000)", (unsigned long long)(t1 - t0)); }
+    { uint32_t ss = a32_find_symbol("sscanf"); LOG("selftest: sscanf %#x", ss);
+      const char *one = getenv("A32_SELFTEST_STR");                          // one string, with the memory dumped first (/tmp/st_*.bin) for replay in Unicorn
+      const char *strs[] = { "1", "10", "100", "5", "0.5", "1.0", "1.5", "2.25", "0.25", "0.1", "12.5", "123.456", "644.0", "-231.0", "1635.0", "2419.784", "1e3", "3.14159" };
+      for (unsigned i = 0; i < (one ? 1 : sizeof strs / sizeof *strs) && ss; i++) {
+          const char *str = one ? one : strs[i];
+          uint32_t s = a32_guest_alloc(64, 8), ff = a32_guest_alloc(16, 8), fl = a32_guest_alloc(16, 8), o = a32_guest_alloc(32, 8); strcpy((char *)g_mem + s, str); strcpy((char *)g_mem + ff, "%f"); strcpy((char *)g_mem + fl, "%lf");
+          if (one) { FILE *fp = fopen("/tmp/st_sdk.bin", "wb"); fwrite(g_mem + 0x2912000, 1, 0x941000, fp); fclose(fp); uint32_t lo = (s & ~0xfffu) - 0x1000; fp = fopen("/tmp/st_buf.bin", "wb"); fwrite(g_mem + lo, 1, 0x10000, fp); fclose(fp);
+                     fp = fopen("/tmp/st_meta.txt", "w"); fprintf(fp, "%u %u %u %u\n", s, fl, o + 8, lo); fclose(fp); LOG("selftest: ---- begin"); }
+          uint32_t b[3] = { s, fl, o + 8 }; uint32_t n2 = a32_callbackv(ss, 3, b); double dd; memcpy(&dd, g_mem + o + 8, 8);
+          if (one) { LOG("selftest: ---- end"); LOG("selftest: sscanf(\"%s\") = %d %.17g", str, (int)n2, dd); continue; }
+          uint32_t a[3] = { s, ff, o }; uint32_t n = a32_callbackv(ss, 3, a); float f; memcpy(&f, g_mem + o, 4);
+          LOG("selftest: sscanf(\"%s\"): %%f -> %d %.9g ; %%lf -> %d %.17g", str, (int)n, f, (int)n2, dd);
+      } }
     for (unsigned i = 0; i < sizeof ticks / sizeof *ticks; i++) {
         uint64_t t = ticks[i]; uint32_t a[4] = { buf, buf + 16, (uint32_t)t, (uint32_t)(t >> 32) }; a32_callbackv(fn, 4, a);
         uint64_t got = rd32(buf) | (uint64_t)rd32(buf + 4) << 32, want = (t / 19200000) * 1000000000ull + (t % 19200000) * 1000000000ull / 19200000;

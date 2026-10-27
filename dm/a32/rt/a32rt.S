@@ -123,6 +123,19 @@ _a32_trace_gate:
     FRAME_RESTORE
     ret
 
+// call counting (translate.py --count-calls): w21 = guest address of the bl / blx about to run; a32_callcnt points at the module's table biased by its base so that the address indexes it
+    .globl _a32_count_gate
+    .p2align 4
+_a32_count_gate:
+    adrp x16, _a32_callcnt@PAGE
+    ldr x16, [x16, _a32_callcnt@PAGEOFF]
+    lsr w17, w21, #2
+    add x16, x16, x17, lsl #2
+    ldr w17, [x16]
+    add w17, w17, #1
+    str w17, [x16]
+    ret
+
     .globl _a32_unsup
     .p2align 4
 _a32_unsup:

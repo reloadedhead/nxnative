@@ -139,8 +139,42 @@ class NeonMixin:
         if not bits(w, 23, 23): return self.neon_3same(w, U, Q, out)
         if bits(w, 21, 19) == 0 and bits(w, 7, 7) == 0 and bits(w, 4, 4): return self.neon_imm(w, U, Q, out)
         if bits(w, 4, 4): return self.neon_shift(w, U, Q, out)
-        if not bits(w, 4, 4) and bits(w, 21, 20) != 3: return self.neon_3diff(w, U, out)
+        if not bits(w, 4, 4) and bits(w, 21, 20) != 3:
+            if bits(w, 6, 6): return self.neon_scalar(w, U, out)                                   # bit 6 set: two registers and a scalar (bit 6 clear: three registers of different lengths)
+            return self.neon_3diff(w, U, out)
         return False
+
+    def neon_scalar(self, w, U, out):
+        """Two registers and a scalar: vmla / vmls / vmul (integer, or f32 non-fused) by Dm[x], and the long forms vmlal / vmlsl / vmull."""
+        size, A = bits(w, 21, 20), bits(w, 11, 8); Q = U
+        d = (bits(w, 22, 22) << 4) | bits(w, 15, 12); n = (bits(w, 7, 7) << 4) | bits(w, 19, 16)
+        if size == 1: m, idx, T, lane_base = bits(w, 2, 0), (bits(w, 5, 5) << 1) | bits(w, 3, 3), 'h', 4
+        else: m, idx, T, lane_base = bits(w, 3, 0), bits(w, 5, 5), 's', 2
+        sc = 'v%d.%s[%d]' % (m >> 1, T, (m & 1) * lane_base + idx)
+        if A in (2, 6, 10):                                                                        # vmlal / vmlsl / vmull (U selects unsigned)
+            if d & 1: raise Unsupported('long scalar operation into an odd q register')
+            mn = {2: 'mlal', 6: 'mlsl', 10: 'mull'}[A]; a = self.dsrc(n, 17, out)
+            TQ, TD = ('4s', '4h') if size == 1 else ('2d', '2s')
+            out.append('%s%s v%d.%s, %s.%s, %s' % ('u' if U else 's', mn, d >> 1, TQ, a, TD, sc)); return True
+        if A not in (0, 4, 8, 1, 5, 9) or size == 0: raise Unsupported('neon two-register-and-scalar A=%d size=%d' % (A, size))
+        isf = A & 1
+        if isf and size != 2: raise Unsupported('half-precision scalar multiply')
+        if Q and (d | n) & 1: raise Unsupported('q register with an odd number')
+        arr = {(1, 1): '8h', (1, 2): '4s', (0, 1): '4h', (0, 2): '2s'}[(Q, size)]
+        dst = 'v%d' % (d >> 1) if Q else 'v16'; a = 'v%d' % (n >> 1) if Q else self.dsrc(n, 17, out)
+        acc = A & 4 or A == 0 or A == 1                                                            # vmla / vmls accumulate into the destination
+        if A in (0, 4, 1, 5) and not Q: out.append('mov v16.d[0], v%d.d[%d]' % (d >> 1, d & 1))
+        if not isf:
+            op = {0: 'mla', 4: 'mls', 8: 'mul'}[A]; out.append('%s %s.%s, %s.%s, %s' % (op, dst, arr, a, arr, sc))
+        else:
+            # NEON floating point runs with flush-to-zero and default NaN; vmla / vmls are not fused (the product is rounded first)
+            ops = ['fmul v18.%s, %s.%s, %s' % (arr, a, arr, sc)]
+            if A == 9: ops = ['fmul %s.%s, %s.%s, %s' % (dst, arr, a, arr, sc)]
+            elif A == 1: ops.append('fadd %s.%s, %s.%s, v18.%s' % (dst, arr, dst, arr, arr))
+            else: ops.append('fsub %s.%s, %s.%s, v18.%s' % (dst, arr, dst, arr, arr))
+            out += ['mrs x19, fpcr', 'movz x20, #0x300, lsl #16', 'msr fpcr, x20'] + ops + ['msr fpcr, x19']
+        if not Q: out.append('mov v%d.d[%d], v16.d[0]' % (d >> 1, d & 1))
+        return True
 
     def neon_regs(self, w, Q):
         d = (bits(w, 22, 22) << 4) | bits(w, 15, 12); n = (bits(w, 7, 7) << 4) | bits(w, 19, 16); m = (bits(w, 5, 5) << 4) | bits(w, 3, 0)
