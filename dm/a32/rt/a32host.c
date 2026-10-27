@@ -269,6 +269,8 @@ int main(int argc, char **argv) {
     front_run(guest_main);                                   // with DM_WINDOW the main thread runs the window and the guest gets its own thread
     return 0;
 }
+static void on_usr1(int sig) { (void)sig; g_trace = g_trace ? 0 : 3; }
+static void on_usr2(int sig) { (void)sig; ring_dump(); }
 static void guest_main(void) {
     int argc = g_argc; char **argv = g_argv;
     g_build_dir = argv[1];
@@ -278,6 +280,7 @@ static void guest_main(void) {
     if (g_mem == MAP_FAILED) die("cannot reserve the 4 GB guest address space");
     struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = on_fault; sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
+    signal(SIGUSR1, on_usr1); signal(SIGUSR2, on_usr2);          // debugging: USR1 toggles the svc trace, USR2 prints the last dispatches
     g_symcap = 1 << 18; g_sym = calloc(g_symcap, sizeof *g_sym);
     // make the whole low part (modules, thread areas, main stack) readable and writable; the guest never executes memory
     if (mprotect(g_mem, 0xf0000000u, PROT_READ | PROT_WRITE)) die("mprotect the guest address space");      // all of it, lazily committed: the 16 KB host pages are coarser than the guest's 4 KB ones

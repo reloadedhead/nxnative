@@ -4,6 +4,7 @@
 #define _DARWIN_C_SOURCE
 #include "a32host.h"
 #include "a32force.h"
+#include "a32gfx.h"
 #include <time.h>
 extern const char *a32_hook_current_name(void);
 static void f_noop(Frame *f) { f->r[0] = 0; }
@@ -76,6 +77,51 @@ static void f_hid_state_none(Frame *f) { NpadState s; hid_fill(&s, 0xffffffffu);
 static void f_hid_style(Frame *f) { static int n; if (n++ < 3) LOG("hid: GetNpadStyleSet id %#x from %s", rd32(f->r[0]), where(f->r[14])); uint32_t id = rd32(f->r[0]); f->r[0] = id == 0 ? 1 : id == 0x20 ? 2 : 0; }                                                  // GetNpadStyleSet: No1 is a full-key controller
 // BindNpadStyleSetUpdateEvent(id, SystemEventType *, clear mode): the game builds its pad object when this event fires, so it is created and signaled at once (a controller is attached from the start)
 extern uint32_t a32_find_symbol(const char *name); extern uint32_t a32_callback(uint32_t pc, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3);
+// nn::swkbd::ShowKeyboard(String *out, const ShowKeyboardArg &): the full-screen keyboard applet
+static void f_swkbd_show(Frame *f) {
+    LOG("swkbd: ShowKeyboard out %#x arg %#x from %s", f->r[0], f->r[1], where(f->r[14]));
+    for (int k = 0; k < 8; k++) LOG("swkbd:   out[%d] = %#x", k, rd32(f->r[0] + 4 * k));
+    for (int k = 0; k < 16; k++) LOG("swkbd:   arg[%#x] = %#x", 4 * k, rd32(f->r[1] + 4 * k));
+    for (int k = 0; k < 4; k++) LOG("swkbd:   arg[%#x] = %#x", 0x3f0 + 4 * k, rd32(f->r[1] + 0x3f0 + 4 * k));
+    f->r[0] = 0x29f;                                                    // cancelled
+}
+// nn::swkbd::InlineKeyboard: the applet is not there; callbacks the game registers are recorded and fired from Calc (where the SDK fires them) once the game has asked for the keyboard
+static uint32_t kb_cb[8];       // 0 finished-initialize, 1 changed-string, 2 decided-enter, 3 decided-cancel, 4 finished-keyboard, 5 changed-string utf8, 6 decided-enter utf8
+static int kb_state, kb_wait;   // 1 launched (finished-initialize due), 2 shown (the name is due)
+static void kb_set(Frame *f, int i) { kb_cb[i] = f->r[1]; LOG("swkbd: callback %d = %#x", i, f->r[1]); f->r[0] = 0; }
+static void f_kb_fin_init(Frame *f) { kb_set(f, 0); }
+static void f_kb_changed(Frame *f) { kb_set(f, 1); }
+static void f_kb_enter(Frame *f) { kb_set(f, 2); }
+static void f_kb_cancel(Frame *f) { kb_set(f, 3); }
+static void f_kb_finished(Frame *f) { kb_set(f, 4); }
+static void f_kb_changed8(Frame *f) { kb_set(f, 5); }
+static void f_kb_enter8(Frame *f) { kb_set(f, 6); }
+static void f_kb_init(Frame *f) { LOG("swkbd: Initialize"); kb_state = 1; kb_wait = 3; f->r[0] = 1; }
+static void f_kb_imgreq(Frame *f) { wr32(f->r[1], 0x400000); wr32(f->r[2], 0x1000); f->r[0] = 0; }          // image memory (the keyboard is not drawn: the game gets a blank image)
+static void f_kb_launch(Frame *f) { LOG("swkbd: Launch"); kb_state = 1; kb_wait = 2; f->r[0] = 0; }
+static void f_kb_appear(Frame *f) { LOG("swkbd: Appear"); kb_state = 2; kb_wait = 30; f->r[0] = 0; }
+static void f_kb_disappear(Frame *f) { LOG("swkbd: Disappear"); kb_state = 4; kb_wait = 10; f->r[0] = 0; }
+static void f_kb_finalize(Frame *f) { LOG("swkbd: Finalize"); kb_state = 0; f->r[0] = 0; }
+// the Utf8 callback arguments: a text buffer (2001 bytes) followed by words from +0x7d4 (the length first; ChangedStringArgUtf8 has three more)
+static uint32_t kb_arg(void) {
+    static uint32_t a; if (!a) a = a32_guest_alloc(0x800, 16);
+    const char *name = getenv("A32_NAME"); if (!name || !*name) name = "Hunter";
+    memset(g_mem + a, 0, 0x800); strncpy((char *)g_mem + a, name, 0x7d0);
+    wr32(a + 0x7d4, (uint32_t)strlen((char *)g_mem + a)); wr32(a + 0x7d8, (uint32_t)strlen((char *)g_mem + a)); return a;
+}
+static void f_kb_calc(Frame *f) {
+    f->r[0] = 0;
+    if (!kb_state || --kb_wait > 0) return;
+    int st = kb_state; kb_state = 0;
+    if (st == 1) { if (kb_cb[0]) { LOG("swkbd: finished initialize"); a32_callback(kb_cb[0], 0, 0, 0, 0); } }
+    else if (st == 2) {                                                 // shown: the player types the name and confirms it
+        uint32_t a = kb_arg(); LOG("swkbd: name \"%s\"", (char *)g_mem + a);
+        if (kb_cb[5]) a32_callback(kb_cb[5], a, 0, 0, 0);
+        if (kb_cb[6]) a32_callback(kb_cb[6], a, 0, 0, 0);
+        kb_state = 4; kb_wait = 20;                                    // confirming hides the keyboard by itself
+    } else if (st == 4) { if (kb_cb[4]) { LOG("swkbd: finished keyboard"); a32_callback(kb_cb[4], 0, 0, 0, 0); } }
+}
+
 static void f_hid_bind_event(Frame *f) {
     uint32_t ev = f->r[1], clear = f->r[2], create = a32_find_symbol("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb"), sig = a32_find_symbol("_ZN2nn2os17SignalSystemEventEPNS0_15SystemEventTypeE");
     if (!create || !sig) { LOG("hid: nn::os system event functions not found"); return; }
@@ -87,7 +133,7 @@ const ForceEnt a32_force[] = {
     { "_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", f_hid_state_none }, { "_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", f_hid_state_none },
     { "_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", f_hid_state_none }, { "_ZN2nn3hid15GetNpadStyleSetERKj", f_hid_style },
     // the inline software keyboard: the game initialises it at startup and never needs it to show anything (no library applet exists here)
-    { "_ZN2nn5swkbd14InlineKeyboard10InitializeEPv", f_noop },
+    { "_ZN2nn5swkbd14InlineKeyboard10InitializeEPv", f_kb_init },
     { "_ZN2nn5swkbd14InlineKeyboard11SetUtf8ModeEb", f_noop },
     { "_ZN2nn5swkbd14InlineKeyboard12GetMaxHeightEv", f_noop },
     { "_ZN2nn5swkbd14InlineKeyboard12SetCursorPosEi", f_noop },
@@ -104,23 +150,25 @@ const ForceEnt a32_force[] = {
     { "_ZN2nn5swkbd14InlineKeyboard18SetKeytopTranslateEff", f_noop },
     { "_ZN2nn5swkbd14InlineKeyboard21SetUsbKeyboardEnabledEb", f_noop },
     { "_ZN2nn5swkbd14InlineKeyboard22SetMovedCursorCallbackEPFvPKNS0_14MovedCursorArgEE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard23SetDecidedEnterCallbackEPFvPKNS0_15DecidedEnterArgEE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard24SetChangedStringCallbackEPFvPKNS0_16ChangedStringArgEE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard24SetDecidedCancelCallbackEPFvvE", f_noop },
+    { "_ZN2nn5swkbd14InlineKeyboard23SetDecidedEnterCallbackEPFvPKNS0_15DecidedEnterArgEE", f_kb_enter },
+    { "_ZN2nn5swkbd14InlineKeyboard24SetChangedStringCallbackEPFvPKNS0_16ChangedStringArgEE", f_kb_changed },
+    { "_ZN2nn5swkbd14InlineKeyboard24SetDecidedCancelCallbackEPFvvE", f_kb_cancel },
     { "_ZN2nn5swkbd14InlineKeyboard26IsUsedTouchPointByKeyboardEii", f_noop },
     { "_ZN2nn5swkbd14InlineKeyboard26SetMovedCursorCallbackUtf8EPFvPKNS0_18MovedCursorArgUtf8EE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard27SetDecidedEnterCallbackUtf8EPFvPKNS0_19DecidedEnterArgUtf8EE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard27SetFinishedKeyboardCallbackEPFvvE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard28SetChangedStringCallbackUtf8EPFvPKNS0_20ChangedStringArgUtf8EE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard29SetFinishedInitializeCallbackEPFvvE", f_noop },
+    { "_ZN2nn5swkbd14InlineKeyboard27SetDecidedEnterCallbackUtf8EPFvPKNS0_19DecidedEnterArgUtf8EE", f_kb_enter8 },
+    { "_ZN2nn5swkbd14InlineKeyboard27SetFinishedKeyboardCallbackEPFvvE", f_kb_finished },
+    { "_ZN2nn5swkbd14InlineKeyboard28SetChangedStringCallbackUtf8EPFvPKNS0_20ChangedStringArgUtf8EE", f_kb_changed8 },
+    { "_ZN2nn5swkbd14InlineKeyboard29SetFinishedInitializeCallbackEPFvvE", f_kb_fin_init },
     { "_ZN2nn5swkbd14InlineKeyboard31SetReleasedUserWordInfoCallbackEPFvvE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard4CalcEv", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard6AppearERKNS0_9AppearArgE", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard6LaunchEv", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard8FinalizeEv", f_noop },
+    { "_ZN2nn5swkbd14InlineKeyboard4CalcEv", f_kb_calc },
+    { "_ZN2nn5swkbd14InlineKeyboard6AppearERKNS0_9AppearArgE", f_kb_appear },
+    { "_ZN2nn5swkbd14InlineKeyboard6LaunchEv", f_kb_launch },
+    { "_ZN2nn5swkbd14InlineKeyboard8FinalizeEv", f_kb_finalize },
     { "_ZN2nn5swkbd14InlineKeyboard8GetImageEPvj", f_noop },
-    { "_ZN2nn5swkbd14InlineKeyboard9DisappearEv", f_noop },
+    { "_ZN2nn5swkbd14InlineKeyboard9DisappearEv", f_kb_disappear },
     { "_ZN2nn5swkbd14InlineKeyboard9SetVolumeEf", f_noop },
+    { "_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", f_swkbd_show },
+    { "_ZN2nn5swkbd14InlineKeyboard25GetImageMemoryRequirementEPjS2_", f_kb_imgreq },
     { "nndiagStartup", f_noop },
     { "_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", f_time_loc }, { "_ZN2nn4time16LoadTimeZoneRuleEPNS0_12TimeZoneRuleERKNS0_12LocationNameE", f_noop },
     { "_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", f_time_now }, { "_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", f_time_now },
