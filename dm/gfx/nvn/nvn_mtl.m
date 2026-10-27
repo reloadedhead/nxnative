@@ -5356,7 +5356,7 @@ static id<MTLFunction> alpha_fs_fn(NvShader *fs, uint32_t func, float ref) {
     id c = g_at_fn[fk]; if (c) { os_unfair_lock_unlock(&g_at_lock); return c == NSNull.null ? nil : c; }
     id lib = g_at_lib[lk];
     if (!lib) {
-        lib = NSNull.null; NSError *e = nil;
+        lib = NSNull.null; NSError *e = nil; uint64_t t0 = bp_now();
         NSString *src = [NSString stringWithContentsOfFile:[NSString stringWithFormat:@"%@/%@.metal", g_msl_dir, lk] encoding:NSUTF8StringEncoding error:&e];
         NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"float4\\s+(\\w+)\\s*\\[\\[color\\(0\\)\\]\\]" options:0 error:nil];
         NSTextCheckingResult *m = src ? [re firstMatchInString:src options:0 range:NSMakeRange(0, src.length)] : nil;
@@ -5370,7 +5370,7 @@ static id<MTLFunction> alpha_fs_fn(NvShader *fs, uint32_t func, float ref) {
             [ns insertString:@"\nconstant int dm_af [[function_constant(100)]];\nconstant float dm_ar [[function_constant(101)]];\n" atIndex:us.location + us.length];
             MTLCompileOptions *co = [MTLCompileOptions new]; co.preserveInvariance = YES;
             id<MTLLibrary> l = [g_dev newLibraryWithSource:ns options:co error:&e];
-            if (l) lib = l; else MLOG("[RED] alpha test: shader %s does not compile with the test: %s", fs->key, e.localizedDescription.UTF8String);
+            if (l) { lib = l; static int n; if (n++ < 12) MLOG("alpha test: shader %s compiled in %.1f ms", fs->key, (bp_now() - t0) / 1e6); } else MLOG("[RED] alpha test: shader %s does not compile with the test: %s", fs->key, e.localizedDescription.UTF8String);
         } }
     g_at_lib[lk] = lib;
     id<MTLFunction> f = nil;
