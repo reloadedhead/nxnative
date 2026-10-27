@@ -6,21 +6,18 @@ ahead of time and linked with a host that plays Horizon's kernel and services.
 
 ## State (October 2026)
 
-What runs, on MHGU 1.0.0, from the real NSP:
+MHGU 1.0.0 runs from the real NSP on a Mac: title screen, new game (hunter name through the host's text box, which stands in for the Switch's inline
+keyboard), movies, audio, village, controls. Graphics, audio, input and the save directory go through the same host code the 64-bit games use
+(`dm/gfx/nvn`, `rt/a32gfx.c`, `rt/a32audren.c`, `rt/a32movie.c`). `run_mhgu.sh` starts it in a window.
 
-- The four modules (rtld, main, subsdk0, sdk: 6.6 million translated instruction slots) load into a 4 GB guest address space, relocate, and link
-  (ELF32 REL relocations, 171,017 relative ones in `main`; imports resolved against the other modules; a few SDK functions taken over by name).
-- The SDK starts as rtld would start it: `_init_libc0`, `nnosInitialize`, `nninitInitializeSdkModule`, `nninitStartup`, `_init_libc2`, each module's
-  `DT_INIT` (all of the game's, subsdk0's and sdk's global constructors), then `nnMain`.
-- The game's own code runs in `nnMain`: it creates worker threads, initialises the time and applet services, mounts its RomFS (the SDK's RomFS
-  parser reads the real RomFS tables through an `IStorage` served by the host), and calls `nv::InitializeGraphics`, which is where it stops (below).
-- Services the host answers over HIPC/CMIF (`rt/a32ipc.c`, `rt/a32svcs.c`, `rt/a32fs.c`): `sm:`, `lm`, `appletOE` (with the message queue
-  `ICommonStateGetter` needs), `fsp-srv` (RomFS storage), and a generic service that succeeds with zeroed output for any other (each command is logged once).
-- Kernel (`rt/a32svc.c`): the 32-bit svc ABI read off the SDK's own svc stubs; threads (pthreads running translated code), address arbitration,
-  process-wide keys, events, `WaitSynchronization`, `GetInfo`, memory queries and maps, the system counter.
+Not done: the PSO manifest (shaders are compiled on first use), online features, packaging as an app, an iOS build.
 
-Where it stops: `nv::InitializeGraphics` (in the sdk module) opens the `nvdrv` service and transfer memory. This SDK ships the NVN driver itself, so
-graphics is the GPU's ioctl interface (nvmap / nvhost-gpu / as-gpu, Maxwell pushbuffers and shaders). That is the next large piece and is not started.
+Debugging aids (environment variables, see `rt/a32host.c` and `rt/a32force.c`): `A32_SVC`, `A32_IPC`, `A32_KEYS` (scripted pad), `A32_DUMP`, `A32_WWATCH`,
+`A32_TRACE_PEEK`, `--trace`/`--count-calls` translator options, `A32_SELFTEST` (tick conversion and `sscanf` checks), `Tab` = 8x guest clock.
+
+Lesson: an instruction that the lifter decodes as the wrong family gives silent wrong results, not a trap (the by-scalar NEON multiplies were taken for
+`vmlal`, which broke `sscanf` fractions and put the hunter under the map). When something is numerically wrong, replay the function in Unicorn and diff the
+trace against the native run (`--trace` output vs a Unicorn code hook), and add the encoding class to `difftest.py`.
 
 ## Design
 
@@ -74,7 +71,5 @@ A32_ROMFS_DIR=<extracted RomFS dir> <out dir>/a32host <out dir>   # A32_SVC=1|2 
 
 ## Next
 
-1. Graphics: `nvdrv` (nvmap, nvhost-gpu, nvhost-as-gpu, nvhost-ctrl) or the NVN API above it; the Maxwell command stream and the game's shaders need translating to Metal.
-2. Audio (`audout`/`audren`), input (`hid`), save data (`fsp-srv` save-data filesystems), the remaining services, and movies.
-3. Thread scheduling closer to Horizon's (priorities, core affinity), and a kernel `svc` set beyond what startup uses.
-4. Packaging (the 130 MB translated image, the RomFS and the Mac app wrapper), and an iOS build, which cannot use a JIT but can embed the same ahead-of-time code.
+1. PSO manifest, packaging (130 MB translated image, RomFS, Mac app wrapper), iOS best-effort build.
+2. Thread scheduling closer to Horizon's, remaining services.
