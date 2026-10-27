@@ -29,8 +29,8 @@ static void f_toposix_utc(Frame *f) { wr64(f->r[0], time_from_calendar(f->r[1]))
 static void f_toposix(Frame *f) { wr32(f->r[0], 1); wr64(f->r[1], time_from_calendar(f->r[3])); f->r[0] = 0; }                 // (int *count, PosixTime *out, int outcount, CalendarTime const &)
 static void f_true(Frame *f) { f->r[0] = 1; }
 // nn::ngc::ProfanityFilter (system data the host does not have): the filter initialises and finds nothing to mask
-static void f_ngc_check(Frame *f) { if (f->r[0]) wr32(f->r[0], 0); f->r[0] = 0; }
-static void f_ngc_mask(Frame *f) { if (f->r[0]) wr32(f->r[0], 0); f->r[0] = 0; }
+static void f_ngc_check(Frame *f) { if (f->r[1]) wr32(f->r[1], 0); f->r[0] = 0; }          // members: r0 is the filter, r1 the output (CheckProfanityWords(uint *flags, ...))
+static void f_ngc_mask(Frame *f) { if (f->r[1]) wr32(f->r[1], 0); f->r[0] = 0; }           // MaskProfanityWordsInText(int *count, text, length): nothing masked
 // nn::diag::detail::AbortImpl(condition, function, file, line, ...): print what the SDK aborts on, then stop. The arguments after `line` are on the stack.
 static void f_abort(Frame *f) {
     const char *c = f->r[0] ? gstr(f->r[0]) : "?", *fn = f->r[1] ? gstr(f->r[1]) : "?", *file = f->r[2] ? gstr(f->r[2]) : "?";
@@ -62,7 +62,15 @@ static uint64_t scripted_keys(void) {
     }
     return b;
 }
+extern uint32_t a32_kb_mgr;
+static void kb_watch(void) {
+    static int on = -1; if (on < 0) on = getenv("A32_KB_DEBUG") != NULL;
+    if (!on || !a32_kb_mgr) return;
+    static uint32_t last[6]; uint32_t m = a32_kb_mgr, v[6] = { rd32(m + 0x2ec8), rd32(m + 0x10), rd32(m + 0x36ac), g_mem[m + 0x2ecc], g_mem[m + 0x2ecd], g_mem[m + 0x2ece] };
+    if (memcmp(v, last, sizeof v)) { memcpy(last, v, sizeof v); LOG("swkbd-watch: state %u [0x10] %u text-state %u flags %u %u %u", v[0], v[1], v[2], v[3], v[4], v[5]); }
+}
 static void hid_fill(NpadState *s, uint32_t id) {
+    kb_watch();
     static int64_t sampling = 1 << 16; memset(s, 0, sizeof *s); s->sampling = ++sampling;
     if (id != 0 && id != 0x20) return;                                          // No1 and the handheld npad report the controller
     uint64_t b = (a32_pad_buttons | scripted_keys()) & 0xffffull; int32_t a[4]; memcpy(a, a32_pad_axes, sizeof a);
@@ -96,12 +104,18 @@ static void f_kb_cancel(Frame *f) { kb_set(f, 3); }
 static void f_kb_finished(Frame *f) { kb_set(f, 4); }
 static void f_kb_changed8(Frame *f) { kb_set(f, 5); }
 static void f_kb_enter8(Frame *f) { kb_set(f, 6); }
-static void f_kb_init(Frame *f) { LOG("swkbd: Initialize"); kb_state = 1; kb_wait = 3; f->r[0] = 1; }
+uint32_t a32_kb_mgr;
+#define kb_mgr a32_kb_mgr
+static void kb_dump(const char *w) {
+    if (!kb_mgr) return;
+    LOG("swkbd: %s: ng-result %#x mgr %#x state %u cbuser %#x text-state %u len %u [0x10] %u text \"%s\"", w, rd32(kb_mgr + 0x36c0), kb_mgr, rd32(kb_mgr + 0x2ec8), rd32(kb_mgr + 0x2ed0), rd32(kb_mgr + 0x36ac), rd32(kb_mgr + 0x36b0), rd32(kb_mgr + 0x10), (char *)g_mem + kb_mgr + 0x2ed8);
+}
+static void f_kb_init(Frame *f) { kb_mgr = f->r[0] - 0x14; LOG("swkbd: Initialize"); kb_state = 1; kb_wait = 3; f->r[0] = 1; }
 static void f_kb_imgreq(Frame *f) { wr32(f->r[1], 0x400000); wr32(f->r[2], 0x1000); f->r[0] = 0; }          // image memory (the keyboard is not drawn: the game gets a blank image)
 static void f_kb_launch(Frame *f) { LOG("swkbd: Launch"); kb_state = 1; kb_wait = 2; f->r[0] = 0; }
 static void f_kb_appear(Frame *f) { LOG("swkbd: Appear"); kb_state = 2; kb_wait = 30; f->r[0] = 0; }
 static void f_kb_disappear(Frame *f) { LOG("swkbd: Disappear"); kb_state = 4; kb_wait = 10; f->r[0] = 0; }
-static void f_kb_finalize(Frame *f) { LOG("swkbd: Finalize"); kb_state = 0; f->r[0] = 0; }
+static void f_kb_finalize(Frame *f) { LOG("swkbd: Finalize"); kb_dump("in Finalize"); kb_state = 0; f->r[0] = 0; }
 // the Utf8 callback arguments: a text buffer (2001 bytes) followed by words from +0x7d4 (the length first; ChangedStringArgUtf8 has three more)
 static uint32_t kb_arg(void) {
     static uint32_t a; if (!a) a = a32_guest_alloc(0x800, 16);
@@ -118,8 +132,9 @@ static void f_kb_calc(Frame *f) {
         uint32_t a = kb_arg(); LOG("swkbd: name \"%s\"", (char *)g_mem + a);
         if (kb_cb[5]) a32_callback(kb_cb[5], a, 0, 0, 0);
         if (kb_cb[6]) a32_callback(kb_cb[6], a, 0, 0, 0);
-        kb_state = 4; kb_wait = 20;                                    // confirming hides the keyboard by itself
-    } else if (st == 4) { if (kb_cb[4]) { LOG("swkbd: finished keyboard"); a32_callback(kb_cb[4], 0, 0, 0, 0); } }
+        kb_dump("after enter");
+        kb_state = 4; kb_wait = getenv("A32_KB_FINISH") ? atoi(getenv("A32_KB_FINISH")) : 20;                                    // confirming hides the keyboard by itself
+    } else if (st == 4) { kb_dump("before finished"); if (kb_cb[4]) { LOG("swkbd: finished keyboard"); a32_callback(kb_cb[4], 0, 0, 0, 0); } kb_dump("after finished"); }
 }
 
 static void f_hid_bind_event(Frame *f) {
