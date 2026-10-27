@@ -283,6 +283,7 @@ static void md_free(uint32_t self) {
     pthread_mutex_lock(&d->dmu); md_job(d, MDJ_QUIT); pthread_mutex_unlock(&d->dmu);
     pthread_join(d->wk, NULL);
     for (int k = 0; k < MD_NOUT; k++) free(d->out[k].frm);
+    for (int k = 0; k < MD_NIN; k++) a32_guest_free(d->in_g[k], MD_INCAP);
     free(d->vhdr[0]); free(d->vhdr[1]);
     pthread_mutex_destroy(&d->mu); pthread_mutex_destroy(&d->dmu); pthread_mutex_destroy(&d->wmu); pthread_cond_destroy(&d->wcv); free(d);
 }
