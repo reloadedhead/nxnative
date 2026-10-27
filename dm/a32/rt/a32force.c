@@ -52,18 +52,20 @@ static uint64_t scripted_keys(void) {
     if (!spec) return 0;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); double now = ((uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000 - t0) / 1000.0;
     static const char *names[] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
-    uint64_t b = 0; const char *p = spec; scripted_ax[0] = scripted_ax[1] = 0;
+    uint64_t b = 0; const char *p = spec; scripted_ax[0] = scripted_ax[1] = 0; int turbo = 0;
     while (*p) {
         double at = atof(p); const char *c = strchr(p, ':'); if (!c) break; c++;
         const char *e = c + strcspn(c, ",");
         if (now >= at && now < at + 0.25) for (const char *k = c; k < e; ) {
             const char *pl = k + strcspn(k, "+,"); size_t n = (size_t)(pl - k);
             for (int i = 0; i < 16; i++) if (strlen(names[i]) == n && !strncmp(k, names[i], n)) b |= 1ull << i;
+            if (n == 2 && k[0] == 'T' && k[1] == 'B') turbo = 1;
             if (n == 2 && k[0] == 'S') { { int32_t mag = getenv("A32_STICK") ? atoi(getenv("A32_STICK")) : 30000; if (k[1] == 'U') scripted_ax[1] = mag; if (k[1] == 'D') scripted_ax[1] = -mag; if (k[1] == 'L') scripted_ax[0] = -mag; if (k[1] == 'R') scripted_ax[0] = mag; } }
             k = *pl == '+' ? pl + 1 : pl;
         }
         p = *e ? e + 1 : e;
     }
+    { extern void dm_turbo_set(int on); static int had; if (turbo || had) { dm_turbo_set(turbo); had = turbo; } }       // TB in A32_KEYS holds the turbo key
     return b;
 }
 extern uint32_t a32_kb_mgr;

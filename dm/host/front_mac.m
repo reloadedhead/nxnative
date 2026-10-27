@@ -96,9 +96,11 @@ static int key_bit(unsigned short code) {
     }
     return -1;
 }
+extern void dm_turbo_set(int on) __attribute__((weak_import));   // a32 front end: hold Tab to fast-forward the guest clock
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
+    if (c == 48 && dm_turbo_set) { dm_turbo_set(down); return; }
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held

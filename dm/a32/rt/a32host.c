@@ -18,7 +18,7 @@ typedef struct {
 static Mod g_mod[MAX_MOD]; static int g_nmod;
 uint8_t *g_mem;                 // guest address 0 = g_mem
 const char *g_build_dir;
-uint64_t a32_tick_scale = 1, a32_tick_offset;      // A32_TICK_OFFSET=<seconds> adds that much to the guest counter                                  // debugging: A32_TICK_SCALE=n makes the guest's system counter run n times fast
+uint64_t a32_tick_ctl[2] __attribute__((aligned(16))) = {1, 0};     // guest counter = real * ctl[0] + ctl[1] (A32_TICK_SCALE, A32_TICK_OFFSET=<seconds>, the turbo key); read and written as a pair                                  // debugging: A32_TICK_SCALE=n makes the guest's system counter run n times fast
 int g_trace; uint32_t g_heap_size; uint8_t g_unimpl_svc_seen[256];
 static int g_verbose;
 void die(const char *fmt, ...) { va_list ap; va_start(ap, fmt); fputs("a32host: ", stderr); vfprintf(stderr, fmt, ap); fputc('\n', stderr); va_end(ap); exit(1); }
@@ -191,7 +191,16 @@ static void ring_dump(void) {
     for (int k = 24; k >= 1; k--) { uint32_t i = (pos - (uint32_t)k) & 255; if (a32_ring[2 + i]) fprintf(stderr, "\n      %s <- %s", where(a32_ring[2 + i]), where(a32_ring[2 + 256 + i])); }
     fputc('\n', stderr);
 }
+// A32_TRACE_PEEK="reg:offset:size" (decimal or 0x): every traced instruction also prints that guest memory value (size 1, 2 or 4 bytes, signed 16 for 2)
+static void trace_peek(const Frame *f) {
+    static int on = -1; static unsigned reg, off, size; if (on < 0) { on = 0; const char *e = getenv("A32_TRACE_PEEK"); if (e && sscanf(e, "%u:%i:%u", &reg, (int *)&off, &size) == 3 && reg < 16) on = 1; }
+    if (!on) return; uint32_t a = f->r[reg] + off; int32_t v = size == 1 ? (int32_t)g_mem[a] : size == 2 ? (int32_t)(int16_t)(g_mem[a] | g_mem[a + 1] << 8) : (int32_t)rd32(a);
+    const char *nn = getenv("A32_TRACE_PEEKN"); int cnt = nn ? atoi(nn) : 0;
+    if (cnt > 0) { fprintf(stderr, "   peek [r%u%+d] = %d |", reg, (int)off, v); uint32_t base = f->r[reg]; for (int i = 0; i < cnt; i++) fprintf(stderr, " %x", rd32(base + 4 * (unsigned)i)); fputc('\n', stderr); }
+    else fprintf(stderr, "   peek [r%u%+d] = %d\n", reg, (int)off, v);
+}
 void a32_trace_c(uint32_t addr, Frame *f) {
+    trace_peek(f);
     const char *mn = "?"; uint32_t mo = addr; for (int i = 0; i < g_nmod; i++) if (addr >= g_mod[i].base && addr < g_mod[i].base + g_mod[i].text) { mn = g_mod[i].name; mo = addr - g_mod[i].base; }
     fprintf(stderr, "T %s+%#x %08x | r0 %08x r1 %08x r2 %08x r3 %08x r4 %08x r5 %08x sp %08x lr %08x nzcv %x\n", mn, mo, rd32(addr), f->r[0], f->r[1], f->r[2], f->r[3], f->r[4], f->r[5], f->r[13], f->r[14], f->nzcv >> 28);
     for (int i = 0; i < 3; i++) if (f->r[i] >= 0x200000 && f->r[i] < 0xf0000000u - 256) { const char *t = gstr(f->r[i]); int n = 0; while (n < 120 && t[n] >= 32 && t[n] < 127) n++; if (n >= 3 && !t[n]) fprintf(stderr, "    r%d -> \"%s\"\n", i, t); }
@@ -240,8 +249,59 @@ uint32_t a32_callback(uint32_t pc, uint32_t a0, uint32_t a1, uint32_t a2, uint32
 
 // ---- faults ---------------------------------------------------------------------------------------------------------------------
 extern int a32_gfx_fault(void *addr, int is_write, void *uc);
+
+// A32_WWATCH=<guest address>: the 16 KB page holding that float is kept read-only; every first write after a short pause is caught, the guest code address of the writer is remembered and
+// the page is opened again. A checker thread prints the writers seen whenever the watched float changes (debugging: who writes this value).
+#include <sys/mman.h>
+static uint64_t g_ww_page, g_ww_addr; static volatile int g_ww_on, g_ww_open; static struct { uint64_t pc; uint32_t r[8]; uint32_t lr, sp; } g_ww_ring[16]; static volatile unsigned g_ww_n;
+static const char *ww_where(uint64_t pc, char *buf, size_t cap) {
+    for (int i = 0; ; i++) {
+        if (!a32_modtab[i].size) break;
+        uint64_t s = (uint64_t)(uintptr_t)a32_modtab[i].slots, e = s + (uint64_t)(a32_modtab[i].size / 4) * 16;
+        if (pc >= s && pc < e) { snprintf(buf, cap, "%s+%#x", g_mod[i].name, a32_modtab[i].lo + (uint32_t)((pc - s) / 16) * 4 - g_mod[i].base); return buf; }
+    }
+    snprintf(buf, cap, "host %#llx", (unsigned long long)pc); return buf;
+}
+// the page stays read-only: a plain "store register, register offset" is carried out here (the page is opened for that one store) and skipped, so no write is missed. Other forms (exclusive
+// stores, ...) open the page for a moment as before.
+static int ww_emulate(ucontext_t *uc, uint64_t fa) {
+    uint64_t pc = uc->uc_mcontext->__ss.__pc; uint32_t insn = *(uint32_t *)(uintptr_t)pc;
+    if ((insn & 0x3f200c00) != 0x38200800 && (insn & 0x3f200c00) != 0x3c200800) return 0;
+    int size = (int)(insn >> 30), V = (int)(insn >> 26 & 1), opc = (int)(insn >> 22 & 3), Rt = (int)(insn & 31);
+    if (opc != 0 || size > 3) return 0;
+    uint64_t val;
+    if (!V) val = Rt == 31 ? 0 : uc->uc_mcontext->__ss.__x[Rt];
+    else { if (size > 3) return 0; memcpy(&val, &uc->uc_mcontext->__ns.__v[Rt], 8); }
+    (void)fa; uint8_t *dst = (uint8_t *)(uintptr_t)fa;
+    mprotect((void *)(uintptr_t)g_ww_page, 0x4000, PROT_READ | PROT_WRITE);
+    memcpy(dst, &val, (size_t)1 << size);
+    mprotect((void *)(uintptr_t)g_ww_page, 0x4000, PROT_READ);
+    uc->uc_mcontext->__ss.__pc = pc + 4; return 1;
+}
+static int ww_fault(uint64_t fa, ucontext_t *uc) {
+    if (!g_ww_on || (fa & ~0x3fffull) != g_ww_page) return 0;
+    if (fa >= g_ww_addr && fa < g_ww_addr + 4) { unsigned k = g_ww_n++ & 15; g_ww_ring[k].pc = uc->uc_mcontext->__ss.__pc; for (int i = 0; i < 8; i++) g_ww_ring[k].r[i] = (uint32_t)uc->uc_mcontext->__ss.__x[i]; g_ww_ring[k].lr = (uint32_t)uc->uc_mcontext->__ss.__x[14]; g_ww_ring[k].sp = (uint32_t)uc->uc_mcontext->__ss.__x[13]; }
+    if (ww_emulate(uc, fa)) return 1;
+    mprotect((void *)(uintptr_t)g_ww_page, 0x4000, PROT_READ | PROT_WRITE); g_ww_open = 1; return 1;
+}
+static void *ww_thread(void *arg) {
+    (void)arg; float last; memcpy(&last, (void *)(uintptr_t)g_ww_addr, 4); unsigned seen = 0;
+    for (;;) {
+        usleep(100);
+        if (g_ww_open) { usleep(50); g_ww_open = 0; mprotect((void *)(uintptr_t)g_ww_page, 0x4000, PROT_READ); }
+        float v; memcpy(&v, (void *)(uintptr_t)g_ww_addr, 4);
+        if (memcmp(&v, &last, 4)) {
+            fprintf(stderr, "[a32] wwatch %#x: %f -> %f; last writers:", (uint32_t)(g_ww_addr - (uint64_t)(uintptr_t)g_mem), last, v);
+            unsigned n = g_ww_n; for (unsigned i = n > 6 ? n - 6 : 0; i < n; i++) { char b[96]; fprintf(stderr, " [%s r0-r3 %08x %08x %08x %08x lr %08x sp %08x]", ww_where(g_ww_ring[i & 15].pc, b, sizeof b), g_ww_ring[i & 15].r[0], g_ww_ring[i & 15].r[1], g_ww_ring[i & 15].r[2], g_ww_ring[i & 15].r[3], g_ww_ring[i & 15].lr, g_ww_ring[i & 15].sp); }
+            fputc('\n', stderr); last = v; seen = n;
+        }
+        (void)seen;
+    }
+    return NULL;
+}
 static void on_fault(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
+    if (ww_fault((uint64_t)(uintptr_t)si->si_addr, uc)) return;
     if (a32_gfx_fault(si->si_addr, (int)(uc->uc_mcontext->__es.__esr >> 6 & 1), uc)) return;
     uint64_t pc = uc->uc_mcontext->__ss.__pc, fa = (uint64_t)(uintptr_t)si->si_addr;
     fprintf(stderr, "[a32] FATAL: signal %d at host pc %#llx, address %#llx", sig, (unsigned long long)pc, (unsigned long long)fa);
@@ -295,19 +355,19 @@ static void *watchf_thread(void *arg) {
         usleep((useconds_t)ms * 1000); char line[256]; int o = 0;
         for (int i = 0; i < n; i++) { float v; memcpy(&v, g_mem + a[i], 4); o += snprintf(line + o, sizeof line - (size_t)o, " %#x=%.3f", a[i], v); }
         struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double e = (double)(t.tv_sec - t0.tv_sec) + (double)(t.tv_nsec - t0.tv_nsec) / 1e9;
-        if (ms >= 1000 || strcmp(line, last)) { fprintf(stderr, "[a32] watch %.2f:%s\n", e, line); snprintf(last, sizeof last, "%s", line); }
+        if (ms >= 1000 || strcmp(line, last)) { struct timespec rt; clock_gettime(CLOCK_REALTIME, &rt); fprintf(stderr, "[a32] watch %.2f @%.3f:%s\n", e, (double)rt.tv_sec + (double)rt.tv_nsec / 1e9, line); snprintf(last, sizeof last, "%s", line); }
     }
     return NULL;
 }
 
 // A32_POKEF="addr:value:seconds": at that many seconds on the scripted key clock the float is written into guest memory (debugging experiments)
 static void *pokef_thread(void *arg) {
-    (void)arg; char spec[128]; snprintf(spec, sizeof spec, "%s", getenv("A32_POKEF")); char *a = strtok(spec, ":"), *v = strtok(NULL, ":"), *t = strtok(NULL, ":");
+    (void)arg; char spec[1024]; snprintf(spec, sizeof spec, "%s", getenv("A32_POKEF")); char *a = strtok(spec, ":"), *v = strtok(NULL, ":"), *t = strtok(NULL, ":");   // addr[,addr...]:value:seconds
     if (!a || !v || !t) return NULL;
     extern uint64_t a32_keys_t0_ms; while (!a32_keys_t0_ms) usleep(50000);
     struct timespec t0 = { (time_t)(a32_keys_t0_ms / 1000), (long)(a32_keys_t0_ms % 1000) * 1000000 };
     for (;;) { struct timespec n; clock_gettime(CLOCK_MONOTONIC, &n); double e = (double)(n.tv_sec - t0.tv_sec) + (double)(n.tv_nsec - t0.tv_nsec) / 1e9; if (e >= atof(t)) break; usleep(20000); }
-    float f = (float)atof(v); memcpy(g_mem + (uint32_t)strtoul(a, NULL, 0), &f, 4); fprintf(stderr, "[a32] poked %s = %f\n", a, f);
+    float f = (float)atof(v); for (char *x = strtok(a, ","); x; x = strtok(NULL, ",")) { memcpy(g_mem + (uint32_t)strtoul(x, NULL, 0), &f, 4); fprintf(stderr, "[a32] poked %s = %f\n", x, f); }
     return NULL;
 }
 static void on_usr1(int sig) { (void)sig; g_trace = g_trace ? 0 : 3; }
@@ -318,8 +378,8 @@ static void guest_main(void) {
     if (getenv("A32_POKEF")) { pthread_t th; pthread_create(&th, NULL, pokef_thread, NULL); pthread_detach(th); }
     if (getenv("A32_WATCHF")) { pthread_t th; pthread_create(&th, NULL, watchf_thread, NULL); pthread_detach(th); }
     if (getenv("A32_DUMP")) { pthread_t th; pthread_create(&th, NULL, dump_thread, NULL); pthread_detach(th); }
-    if (getenv("A32_TICK_OFFSET")) a32_tick_offset = (uint64_t)(atof(getenv("A32_TICK_OFFSET")) * 19200000.0);
-    if (getenv("A32_TICK_SCALE")) a32_tick_scale = (uint64_t)atoll(getenv("A32_TICK_SCALE"));
+    if (getenv("A32_TICK_OFFSET")) a32_tick_ctl[1] = (uint64_t)(atof(getenv("A32_TICK_OFFSET")) * 19200000.0);
+    if (getenv("A32_TICK_SCALE")) a32_tick_ctl[0] = (uint64_t)atoll(getenv("A32_TICK_SCALE"));
     g_verbose = argc > 2 && !strcmp(argv[2], "-v"); g_trace = getenv("A32_SVC") ? atoi(getenv("A32_SVC")) : 1;
     setvbuf(stderr, NULL, _IOLBF, 0);
     g_mem = mmap(NULL, (1ull << 32) + (1ull << 20), PROT_NONE, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
@@ -332,6 +392,7 @@ static void guest_main(void) {
     if (mprotect(g_mem, 0xf0000000u, PROT_READ | PROT_WRITE)) die("mprotect the guest address space");      // all of it, lazily committed: the 16 KB host pages are coarser than the guest's 4 KB ones
     load_modules(argv[1]);
     LOG("%d modules loaded", g_nmod);
+    if (getenv("A32_WWATCH")) { g_ww_addr = (uint64_t)(uintptr_t)g_mem + strtoul(getenv("A32_WWATCH"), NULL, 0); g_ww_page = g_ww_addr & ~0x3fffull; g_ww_on = 1; mprotect((void *)(uintptr_t)g_ww_page, 0x4000, PROT_READ); pthread_t th; pthread_create(&th, NULL, ww_thread, NULL); pthread_detach(th); }
     { extern const void *const *const a32_chunk_tab[]; extern const unsigned a32_chunk_n[], a32_chunk_size;      // the translated slots must be exactly where the dispatcher computes them
       for (int i = 0; i < g_nmod; i++) for (unsigned k = 1; k < a32_chunk_n[i]; k++)
           if ((const char *)a32_chunk_tab[i][k] - (const char *)a32_chunk_tab[i][0] != (long)k * a32_chunk_size) die("%s: translated chunk %u is not at the expected offset: the linker inserted code between the slot chunks", g_mod[i].name, k); }

@@ -44,5 +44,5 @@ int main(int argc, char **argv) {
 }
 
 // symbols the lifted code of some instruction words refers to (the runtime provides them in the game)
-unsigned long long a32_tick_scale = 1, a32_tick_offset = 0;
+unsigned long long a32_tick_ctl[2] __attribute__((aligned(16))) = {1, 0};
 void a32_svc_gate(void) {}

@@ -52,3 +52,15 @@ void *objmap_del(const void *g) { void *r = NULL; pthread_mutex_lock(&g_objmu); 
 void hle_bind_system_event(void *ev, int clear) { (void)ev; (void)clear; }
 void hle_signal_system_event(void *ev) { (void)ev; }
 void dm_host_helper_qos(int q) { (void)q; }
+
+
+// Turbo: while the key is held the guest's system counter runs faster (debugging aid for slow stretches of the game). The counter is real * ctl[0] + ctl[1] and the pair is replaced in one store
+// with ctl[1] adjusted by the real counter, so the guest sees no jump when the speed changes.
+extern uint64_t a32_tick_ctl[2];
+void dm_turbo_set(int on) {
+    static int cur; if (on == cur) return; cur = on;
+    uint64_t cnt, frq; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cnt)); __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+    uint64_t q = cnt / frq, r = cnt % frq, real = q * 19200000ull + r * 19200000ull / frq;
+    uint64_t s0 = a32_tick_ctl[0], o0 = a32_tick_ctl[1], s1 = on ? (getenv("A32_TURBO") ? (uint64_t)atoll(getenv("A32_TURBO")) : 8) : 1, o1 = o0 + real * (s0 - s1);
+    __asm__ volatile("stp %0, %1, [%2]" :: "r"(s1), "r"(o1), "r"(a32_tick_ctl) : "memory");
+}
